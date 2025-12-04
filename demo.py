@@ -2005,14 +2005,14 @@ def main():
     try:
         mode = st.segmented_control(
             "モード選択",
-            options=["カレンダー", "水温(GSI)", "ラーバ", "採苗数"],
+            options=["カレンダー", "デモ1", "デモ2", "デモ3"],
             key="main_mode",
             default="カレンダー"
         )
     except Exception:
         mode = st.radio(
             "モード選択",
-            options=["カレンダー", "水温(GSI)", "ラーバ", "採苗数"],
+            options=["カレンダー", "デモ1", "デモ2", "デモ3"],
             index=0,
             horizontal=True,
             key="main_mode"
@@ -2023,13 +2023,13 @@ def main():
     # ---- サイドバーUI（条件表示）----
     sel_areas = None
     with st.sidebar:
-        if mode == "水温(GSI)":
+        if mode == "デモ1":
             st.caption("")
 
-        if mode in ("水温(GSI)", "ラーバ", "採苗数"):
-            if mode == "水温(GSI)":
+        if mode in ("デモ1", "デモ2", "デモ3"):
+            if mode == "デモ1":
                 key_areas = "water_areas"
-            elif mode == "ラーバ":
+            elif mode == "デモ2":
                 key_areas = "larv_areas"
             else:  # "採苗数"
                 key_areas = "sc_areas"
@@ -2041,15 +2041,15 @@ def main():
                 key=key_areas
             )
 
-    if mode == "水温(GSI)":
+    if mode == "デモ1":
         reset_sidebar_state_for('water_')
         render_water_with_optional_gsi_overlay(selected_areas_for_gsi=sel_areas)
 
-    elif mode == "ラーバ":
+    elif mode == "デモ2":
         reset_sidebar_state_for('larv_')
         render_larvae_mode(sel_areas)
 
-    elif mode == "採苗数":
+    elif mode == "デモ3":
         reset_sidebar_state_for('sc_')
         render_scallop_mode(sel_areas)
 
