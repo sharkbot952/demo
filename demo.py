@@ -11,35 +11,49 @@ from plotly.subplots import make_subplots
 from datetime import date
 from streamlit.components.v1 import html as st_html
 from datetime import datetime, timedelta
+from pathlib import Path
 
 # =========================
-# 基本設定／パス
+# 基本設定
 # =========================
-st.set_page_config(page_title="デモ版", layout="centered")
+st.set_page_config(page_title="統合版", layout="wide")
 ANCHOR_YEAR = 2000
 
 
-DEFAULT_BASE_DIR ="data" 
+DEFAULT_BASE_DIR = "data"
 base_dir = os.environ.get("APP_BASE_DIR", DEFAULT_BASE_DIR)
 
 def pjoin(*parts: str) -> str:
     return os.path.normpath(os.path.join(*parts))
 
 
-# CSVパス base_dir 直下のファイル
-MATURITY_PATH = pjoin(base_dir, "maturity.csv")
-LARVAE_PATH   = pjoin(base_dir, "larvae.csv")
-NUM_PATH      = pjoin(base_dir, "collector_number.csv")
-SIZE_PATH     = pjoin(base_dir, "collector_size.csv") 
+MATURITY_PATH = pjoin(base_dir, "maturity.csv")          
+LARVAE_PATH   = pjoin(base_dir, "larvae.csv")            
 
 TITLE_SIZE = 18
 TEMP_MIN, TEMP_MAX = -2.0, 40.0
 
 # =========================
-# 共通ユーティリティ（時刻変換・読込・asof・Area系）
+# 共通ユーティリティ
 # =========================
 
 from typing import Optional
+def inject_compact_css():
+    st.markdown("""
+    <style>
+      .block-container { padding-top: 0.8rem; padding-bottom: 0.8rem; }
+      [data-testid="stSidebar"] { width: 18rem; }
+      .stPlotlyChart, .element-container { margin-bottom: 0.6rem; }
+    </style>
+    """, unsafe_allow_html=True)
+
+def file_fingerprint(path: str) -> str:
+    try:
+        st = os.stat(path)
+        return f"{st.st_size}-{int(st.st_mtime)}"
+    except Exception:
+        return ""
+
 def resolve_dr_path(base_dir: str, filename: str) -> Optional[str]:
     parent = pjoin(base_dir, 'pred')
     try:
@@ -124,12 +138,12 @@ def read_csv_path(path: str, try_encodings=("utf-8", "utf-8-sig", "cp932")):
         except Exception as e:
             last_err = e
             continue
-    st.error(f"CSV読み込みに失敗: {path}\n{last_err}")
+    st.error(f"CSV読み込みに失敗しました: {path}\n{last_err}")
     return None
 
 def load_all_areas():
     areas = set()
-    for path in [LARVAE_PATH, NUM_PATH, SIZE_PATH]:
+    for path in [LARVAE_PATH]:
         df = read_csv_path(path)
         if df is not None and "Area" in df.columns:
             areas.update(df["Area"].dropna().astype(str).unique().tolist())
@@ -142,9 +156,7 @@ def safe_merge_asof_by_depth(
     right_value_cols: List[str],
     suffixes: Tuple[str, str] = ("_x", "_y"),
 ) -> pd.DataFrame:
-    """
-    depth_m ごとに asof マージ（datetime近傍）を安全に実施。
-    """
+
     out_list = []
     common_depths = sorted(
         set(left["depth_m"].dropna().unique()).intersection(
@@ -202,9 +214,7 @@ def compute_depthwise_regression(
     end_dt: Optional[pd.Timestamp] = None,
     min_pairs: int = 10,
 ) -> Tuple[Optional[Dict[int, Tuple[float, float]]], Optional[Dict[int, int]]]:
-    """
-    深さ別の線形回帰（obs ≈ α + β*pred）を asof マージで学習。
-    """
+
     dr_path  = pjoin(base_dir, "pred", train_filename)
     obs_path = pjoin(base_dir, "obs",  train_filename)
     if not (os.path.exists(dr_path) and os.path.exists(obs_path)):
@@ -213,7 +223,7 @@ def compute_depthwise_regression(
         pred = pd.read_csv(dr_path)
         obs  = pd.read_csv(obs_path)
     except Exception as e:
-        st.warning(f"補正用ファイルの読み込みに失敗: {e}")
+        st.warning(f"補正用ファイルの読み込みに失敗しました: {e}")
         return None, None
 
     pred["datetime"] = utc_to_jst_naive(pred.get("Date"))
@@ -261,7 +271,7 @@ def compute_depthwise_regression(
 
 
 # =========================
-# GSI集計（重ね合わせ用）
+# GSI集計（オーバーレイ用｜Sex別に常時分割）
 # =========================
 @st.cache_data(show_spinner=False)
 def get_gsi_agg(selected_areas: List[str], years_sel: List[int]) \
@@ -283,6 +293,7 @@ def get_gsi_agg(selected_areas: List[str], years_sel: List[int]) \
         df["GSI"] = pd.to_numeric(df["GSI"], errors="coerce")
     df = df.dropna(subset=["Date", "GSI"]).copy()
 
+    # Sex が無い or 欠損 → Unknown で補う
     if "Sex" not in df.columns:
         df["Sex"] = "Unknown"
     else:
@@ -314,7 +325,7 @@ def get_gsi_agg(selected_areas: List[str], years_sel: List[int]) \
     return out, all_mmdd
 
 # =========================
-# 水温グラフ
+# 水温グラフ（MM/DD入力・年選択適用・GSI帯の弱色化 版）
 # =========================
 from typing import List
 import os
@@ -327,8 +338,13 @@ from plotly.subplots import make_subplots
 import plotly.graph_objs as go
 import plotly.express as px
 
+# NOTE: 以下の変数/関数は環境に既存前提
+# base_dir, pjoin, ANCHOR_YEAR, MATURITY_PATH, TEMP_MIN, TEMP_MAX
+# load_dr_single_file, jst_to_naive, safe_merge_asof_by_depth, compute_depthwise_regression,
+# read_csv_path, get_gsi_agg
 
 def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
+    # --- ファイル選択・存在チェック ---
     parent_folder_dr = pjoin(base_dir, "pred")
     if not os.path.exists(parent_folder_dr):
         st.error(f"フォルダが見つかりません: {parent_folder_dr}")
@@ -342,6 +358,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
     # ユーティリティ
     # ======================
     def parse_mmdd(s: str) -> dt.date:
+        """MM/DD を dt.date(ANCHOR_YEAR-mm-dd) へ。エラー時は None。"""
         try:
             m, d = dt.datetime.strptime(s.strip(), "%m/%d").month, dt.datetime.strptime(s.strip(), "%m/%d").day
             return dt.date(ANCHOR_YEAR, m, d)
@@ -349,10 +366,12 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
             return None
 
     def to_anchor_ts(ts: pd.Series) -> pd.Series:
+        """datetime -> ANCHOR_YEARへ年を差し替えたTimestamp（x軸用）"""
         d = pd.to_datetime(ts, errors="coerce")
         return pd.to_datetime(d.dt.strftime(f"{ANCHOR_YEAR}-%m-%d %H:%M:%S"))
 
     def mmdd_mask(series_dt: pd.Series, start_anchor: pd.Timestamp, end_anchor: pd.Timestamp) -> pd.Series:
+        """月日範囲（年跨ぎ対応）でTrue/Falseを返す"""
         anchored = pd.to_datetime(series_dt.dt.strftime(f"{ANCHOR_YEAR}-%m-%d %H:%M:%S"))
         if start_anchor <= end_anchor:
             return (anchored >= start_anchor) & (anchored <= end_anchor)
@@ -361,6 +380,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
             return (anchored >= start_anchor) | (anchored <= end_anchor)
 
     def anchored_day_span(start_anchor: pd.Timestamp, end_anchor: pd.Timestamp) -> int:
+        """選択範囲の日数（wrap対応、両端含む）"""
         y_start = pd.Timestamp(f"{ANCHOR_YEAR}-01-01")
         y_end = pd.Timestamp(f"{ANCHOR_YEAR}-12-31")
         if start_anchor <= end_anchor:
@@ -373,16 +393,18 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
     # ======================
     with st.sidebar:
         selected_file = st.selectbox(
-            "エリアを選択",
+            "対象エリアを選択",
             sorted(dr_files),
             key="sb_selected_file"
         )
 
+        # DRプレビュー
         df_dr_preview = load_dr_single_file(base_dir, selected_file)
         if df_dr_preview.empty:
-            st.warning("データが読み込めませんでした")
+            st.warning("DRデータが読み込めませんでした")
             st.stop()
 
+        # 利用可能年（DR/GSIから統合）
         years_dr = sorted(pd.to_datetime(df_dr_preview["datetime"]).dt.year.dropna().unique().tolist())
         df_gsi_pre = read_csv_path(MATURITY_PATH)
         years_gsi: list = []
@@ -410,9 +432,9 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
             key="main_years"
         )
 
-        overlay_gsi   = st.checkbox("GSIを重ねる", value=False, key="sb_overlay_gsi")
+        overlay_gsi   = st.checkbox("GSIを右軸で重ねる", value=False, key="sb_overlay_gsi")
         use_correction = st.checkbox("実測ベース補正(回帰)", value=False, key="sb_use_correction")
-        show_sekisan   = st.checkbox("積算水温を表示", value=False, key="show_sekisan")
+        show_sekisan   = st.checkbox("積算水温を表示する", value=False, key="show_sekisan")
 
     # 入力検証（MM/DD）
     start_anchor_date    = parse_mmdd(start_mmdd)
@@ -436,7 +458,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
     # --- DR 読み込み（本処理用） ---
     df_dr = load_dr_single_file(base_dir, selected_file)
     if df_dr.empty:
-        st.warning("データが読み込めませんでした")
+        st.warning("DRデータが読み込めませんでした")
         st.stop()
     df_dr["datetime"] = pd.to_datetime(df_dr["datetime"], errors="coerce")
     df_dr = df_dr.dropna(subset=["datetime"]).copy()
@@ -452,7 +474,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
     # 深度一覧
     depths_all = sorted(set(df_dr["depth_m"].dropna().astype(int).tolist())) if not df_dr.empty else []
     default_depths = depths_all[:min(1, len(depths_all))]
-    selected_depths = st.multiselect("表示する水深", depths_all, default=default_depths, key="main_depths")
+    selected_depths = st.multiselect("表示する水深(複数選択可)", depths_all, default=default_depths, key="main_depths")
 
     # アンカーTimestamp
     start_anchor_ts   = pd.Timestamp(start_anchor_date)
@@ -476,21 +498,21 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
                 mask_obs = mmdd_mask(df_obs["datetime"], start_anchor_ts, end_anchor_ts)
                 df_obs_period = df_obs[mask_obs].copy()
             except Exception as e:
-                st.warning(f"OBSの読み込みに失敗: {obs_path} ({e})")
+                st.warning(f"OBSの読み込みに失敗しました: {obs_path} ({e})")
                 df_obs_period = pd.DataFrame()
         else:
             st.info("obs フォルダに同名CSVがありません。実測点は表示されません。")
 
-    # 補正（選択年の最新日時を基準に直近30日）
+    # 補正学習（選択年の最新日時を基準に直近30日）
     reg_depthwise, n_match_reg = None, None
     if use_correction:
         if df_dr.empty:
-            st.warning("補正用のデータがありません")
+            st.warning("補正用のDRデータがありません")
         else:
             mask_period = mmdd_mask(df_dr["datetime"], start_anchor_ts, end_anchor_ts)
             df_dr_period = df_dr[mask_period].copy()
             if df_dr_period.empty:
-                st.warning("選択期間内にデータがありません。最新時刻からの基準に戻ります。")
+                st.warning("選択期間内にDRデータがありません。最新時刻からの基準にフォールバックします。")
                 period_end_max = pd.to_datetime(df_dr["datetime"]).max()
             else:
                 period_end_max = pd.to_datetime(df_dr_period["datetime"]).max()
@@ -511,14 +533,14 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
                     start_dt=train_start_dt, end_dt=train_end_dt, min_pairs=5
                 )
 
-    # GSI年選択
+    # GSI年選択（共通年を使用）
     gsi_years_sel = selected_years if overlay_gsi else []
     area_year_sex_dict, all_mmdd = ({}, [])
     if overlay_gsi:
         area_year_sex_dict, all_mmdd = get_gsi_agg(selected_areas_for_gsi, gsi_years_sel)
     sex_style = {
-        "F": {"dash": "dash", "alpha_band": 0.18, "label": "F", "color": "#d62728"},
-        "M": {"dash": "solid",  "alpha_band": 0.18, "label": "M", "color": "#1f77b4"},
+        "F": {"dash": "dash", "alpha_band": 0.18, "label": "F", "color": "#d62728"},  # 雌
+        "M": {"dash": "solid",  "alpha_band": 0.18, "label": "M", "color": "#1f77b4"},  # 雄
         "Unknown": {"dash": "dot", "alpha_band": 0.18, "label": "Unknown", "color": "#7f7f7f"},
     }
 
@@ -546,6 +568,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
     if selected_depths and (not df_dr.empty):
         traces_added = 0
         for d in selected_depths:
+            # OBSがある水深だけに制限（補正ON時の方針）
             if use_correction and only_depths_with_obs_when_correct and not df_obs_period.empty:
                 obs_depths = set(df_obs_period["depth_m"].dropna().astype(int).tolist())
                 if int(d) not in obs_depths:
@@ -554,6 +577,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
                 df_dy = df_dr[(df_dr["depth_m"] == d) & (df_dr["year"] == y)].copy()
                 if df_dy.empty:
                     continue
+                # 1Hリサンプル（中央値）・補間
                 if "pred_temp" in df_dy.columns and not df_dy.empty:
                     df_dy = df_dy.groupby(["depth_m", "datetime"], as_index=False).agg({"pred_temp": "median"})
                     df_dy = (
@@ -593,7 +617,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
                 ), row=1, col=1, secondary_y=False)
                 traces_added += 1
 
-                # 実測
+                # 実測値（OBS水温）
                 if not df_obs_period.empty:
                     df_obs_dy = df_obs_period[(df_obs_period["depth_m"] == d) & (df_obs_period["year"] == y)].copy()
                     if not df_obs_dy.empty:
@@ -610,7 +634,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
                             legendgroup=f"{d}-{y}"
                         ), row=1, col=1, secondary_y=False)
                            
-                # 補正水温
+                # 補正水温（補正ON時のみ）
                 if use_correction and (reg_depthwise is not None) and (int(d) in (reg_depthwise or {})):
                     alpha, beta = reg_depthwise[int(d)]
                     y_corr = np.clip(alpha + beta * y_raw.astype(float), TEMP_MIN, TEMP_MAX)
@@ -624,8 +648,9 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
                     ), row=1, col=1, secondary_y=False)
                     
 
-                # 積算水温
+                # 積算水温（日平均・オンのとき）
                 if show_sekisan:
+                    # ① 期間マスク“前”の df_dy_full を作る（深度・年で絞るが、月日フィルタはかけない）
                     df_dy_full = df_dr[(df_dr["depth_m"] == d) & (df_dr["year"] == y)].copy()
                     if "pred_temp" in df_dy_full.columns and not df_dy_full.empty:
                         df_dy_full = (
@@ -646,7 +671,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
                             .sort_values("date_day")
                         )
                         df_daily_full["dt"] = pd.to_datetime(df_daily_full["date_day"])
-                        # ③ 積算の“計算”は「起算～期間終了」で実施
+                        # ③ 積算の“計算”は「起算～期間終了」で行う（wrap対応）
                         mask_calc = mmdd_mask(df_daily_full["dt"], sekisan_anchor_ts, end_anchor_ts)
                         df_daily_calc = df_daily_full[mask_calc].copy()
                         if not df_daily_calc.empty:
@@ -655,7 +680,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
                             df_daily_show = df_daily_calc[mask_show].copy()
                             if not df_daily_show.empty:
                                 x_sekisan = df_daily_show["dt"].map(lambda d0: pd.Timestamp(f"{ANCHOR_YEAR}-{d0:%m-%d}"))
-                                # 予測積算
+                                # 予測積算（起算からの通算）
                                 y_pred_accum = df_daily_calc["pred_temp"].cumsum()
                                 # 表示区間に合わせた値だけ抽出（dtで join）
                                 y_pred_accum_show = y_pred_accum.loc[df_daily_calc.index].reindex(df_daily_show.index).values
@@ -665,7 +690,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
                                     line=dict(color=line_color, width=2, dash="dot"),
                                     opacity=0.70
                                 ), row=1, col=1, secondary_y=False)
-                                # 補正積算：起算から通算→表示区間へ
+                                # 補正積算（補正ON時のみ）：起算から通算→表示区間へ
                                 if use_correction and (reg_depthwise is not None) and (int(d) in reg_depthwise):
                                     alpha, beta = reg_depthwise[int(d)]
                                     y_corr_daily_calc = np.clip(alpha + beta * df_daily_calc["pred_temp"].astype(float),
@@ -685,7 +710,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
                     [merged_for_points, df_dy[["datetime", "anchored_dt", "depth_m"]].copy()], axis=0
                 )
 
-    # GSI重ね合わせ（右軸）：平均±1σ帯＋平均線
+    # GSIオーバーレイ（右軸）：平均±1σ帯＋平均線（弱色帯、年なし hover）
     if overlay_gsi and area_year_sex_dict:
         def mmdd_to_anchor(mmdd: str) -> pd.Timestamp:
             return pd.to_datetime(f"{ANCHOR_YEAR}-{mmdd}")
@@ -737,7 +762,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
                     ), row=1, col=1, secondary_y=True)
 
     # レイアウト
-    show_legend = st.checkbox("凡例", value=True, key="main_show_legend")
+    show_legend = st.checkbox("凡例を表示", value=True, key="main_show_legend")
     legend_cfg = dict(orientation="h", yanchor="top", y=1.02, xanchor="right", x=1,
                       font=dict(size=12), itemsizing="constant")
     fig.update_layout(
@@ -749,7 +774,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
     )
     fig.update_layout(hovermode="x unified")
 
-    # X軸
+    # X軸：自動刻み幅
     total_days = anchored_day_span(start_anchor_ts, end_anchor_ts)
     if total_days <= 14:
         dtick = "D1"
@@ -812,7 +837,7 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
     st.plotly_chart(fig, use_container_width=True)
 
 # =========================
-# ラーバ
+# ラーバモード（表はページ最下段にまとめて表示：初期は折りたたみ）
 # =========================
 from typing import List
 from datetime import date
@@ -830,7 +855,13 @@ def _larvae_render_horizontal_with_year_column(
     max_days: int,
     x_max: float
 ):
-
+    """
+    Mode B（横棒：年×日別）— 左端に“年専用列”を追加（軸は非表示）
+    - 月日のサブプロットタイトルは列ごとの上部（M/D 表記）
+    - 本体のY軸ラベルは col=2 のみ表示（col>=3 は非表示）
+    - 棒の色は3分類（<200 / 200–259 / >=260）
+    - X軸の最大値は「モードでひとつ（x_max）」を使用
+    """
     from plotly.subplots import make_subplots
     import plotly.graph_objects as go
 
@@ -838,6 +869,7 @@ def _larvae_render_horizontal_with_year_column(
         m, d = mdstr.split('-')
         return f"{int(m)}/{int(d)}"
 
+    # 月日整列＋最大日数制限
     if q.empty:
         st.info("選択条件に該当するデータがありません。")
         return
@@ -847,12 +879,11 @@ def _larvae_render_horizontal_with_year_column(
         key=lambda s: pd.to_datetime(f"2000-{s}").dayofyear
     )
     if len(days_all) > max_days:
-        st.sidebar.caption(f"※日数が多いので最初の {max_days} 日のみ表示。期間や最大日数を調整してください。")
         days_all = days_all[:max_days]
 
     years_to_show = sorted(q["Year"].unique().tolist(), reverse=True)
     if not years_to_show:
-        st.info("選択年のデータがありません。")
+        st.info("選択年の期間内データがありません。")
         return
 
     # 帯定義（20 μm刻み）
@@ -871,7 +902,7 @@ def _larvae_render_horizontal_with_year_column(
         vals   = [bins_sum[bl]     for bl in sorted(bins_sum.keys())]
         return labels, vals
 
-    # サブプロット構成
+    # サブプロット構成（左端は年列＝タイトルなし）
     n_days = len(days_all)
     titles = []
     for _ in years_to_show:
@@ -880,9 +911,9 @@ def _larvae_render_horizontal_with_year_column(
     fig = make_subplots(
         rows=len(years_to_show), cols=n_days + 1,
         shared_yaxes=False, shared_xaxes=True,
-        horizontal_spacing=0.02, vertical_spacing=0.08,
+        horizontal_spacing=0.01, vertical_spacing=0.08,
         subplot_titles=titles,
-        column_widths=[0.06] + [(1.0 - 0.06) / max(1, n_days)] * n_days
+        column_widths=[0.02] + [(1.0 - 0.02) / max(1, n_days)] * n_days
     )
 
     # 年列の軸は非表示
@@ -903,40 +934,61 @@ def _larvae_render_horizontal_with_year_column(
                 x=vals, y=labels, orientation="h",
                 marker=dict(color=colors_per_bar, line=dict(color="#000", width=1)),
                 showlegend=False, opacity=0.6,
+                # f文字列内の %{..} は {{..}} でエスケープ
                 hovertemplate=(f"年: {yr}<br>日: {mmdd_to_md(md)}<br>帯: %{{y}}<br>合計: %{{x:.2f}}")
             ), row=r, col=idx)
 
+            # Y軸は col=2 のみ表示
             fig.update_yaxes(
                 categoryorder="array", categoryarray=band_labels, automargin=True,
                 showticklabels=(idx == 2),
                 ticks=("outside" if idx == 2 else ""),
                 row=r, col=idx
             )
+            # X軸の共通最大値
             fig.update_xaxes(range=[0, x_max], row=r, col=idx)
 
+        # 左ガターに年注釈（縦書き）
         R = max(1, len(years_to_show))
         y_paper_mid = 1 - (r - 0.5) / R
+        # Y軸の項目値（サイズ帯ラベル）より確実に左へ：paper左端(x=0)から左マージン内へxshiftで退避
+        # ※margin.l=120 前提。ラベル幅に余裕を見て -80px 固定（隙間を詰める）
         fig.add_annotation(
-            text=f"{yr}年", xref="paper", yref="paper", x=-0.12, y=y_paper_mid,
-            showarrow=False, align="center", yanchor="middle",
-            font=dict(size=12, color="#222"), textangle=-90
+            text=f"{yr}年",
+            xref="paper", yref="paper",
+            x=0, y=y_paper_mid,
+            xanchor="right", yanchor="middle",
+            xshift=-80,
+            showarrow=False,
+            align="center",
+            font=dict(size=12, color="#222"),
+            textangle=-90
         )
 
     fig.update_layout(
-        xaxis_title="", yaxis_title="サイズ（μm）",
+        xaxis_title="", yaxis_title="サイズ帯（μm）",
         plot_bgcolor="white", paper_bgcolor="white",
         height=max(260, 240 * len(years_to_show)),
-        margin=dict(l=110, r=10, t=60, b=10),
+        margin=dict(l=120, r=10, t=60, b=10),
         font=dict(size=13, color="#222"),
         legend=dict(orientation="h", y=-0.12)
     )
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_larvae_mode(selected_areas: List[str]):
+def render_larvae_mode(selected_areas: Optional[List[str]]):
+    """
+    ラーバ：Mode B（縦棒：期間／比率、横棒：年×日別／実値）
+    - 縦棒は3分類色を維持しつつ年度ごとの濃淡で視認性UP（新しい年ほど濃い）
+    - 横棒は年×日別列（元実装準拠）
+    - 表は常に生成し、ページ最下段でまとめて表示（初期は折りたたみ）
+    - 期間選択は採苗数モードと同じ“スライダー（MM-DD）”
+    - グラフ直下に「期間/Area/年」キャプションを表示
+    """
     import plotly.graph_objects as go
     from datetime import date
 
+    # 読み込み・前処理
     df = read_csv_path(LARVAE_PATH)
     if df is None:
         st.stop()
@@ -948,6 +1000,7 @@ def render_larvae_mode(selected_areas: List[str]):
     if "Area" in df.columns:
         df["Area"] = df["Area"].astype(str)
 
+    # サイズ列抽出・数値化
     size_cols  = [c for c in df.columns if c.isdigit()]  # 例: "160", "180", ...
     size_ints  = sorted(int(c) for c in size_cols)
     others_col = next((c for c in df.columns if c.lower().startswith("others")), None)
@@ -956,25 +1009,61 @@ def render_larvae_mode(selected_areas: List[str]):
     if others_col:
         df[others_col] = pd.to_numeric(df[others_col], errors="coerce").fillna(0.0)
 
-    with st.sidebar:
-        years_all = sorted(df["Year"].dropna().unique().tolist())
-        latest    = years_all[-1] if years_all else None
-        years_sel = st.multiselect("表示年", years_all, default=[latest] if latest else [])
+    # 画面内UI（ラーバモードはサイドバーを使わない）
+    # ① 横棒の最大表示：5日固定
+    # ② 横棒X軸：表示される日（先頭5日）の最大値に自動追従（任意調整なし）
+    # ③ グラフ種類：日別 / 期間（文言短縮）
+    # ④ エリア選択・表示年・対象期間もメイン画面で完結
 
-        # 採苗数モードと同じレンジ・既定（3/1〜7/31）
-        min_md    = date(ANCHOR_YEAR, 3, 1)
-        max_md    = date(ANCHOR_YEAR, 7, 31)
-        def_start = date(ANCHOR_YEAR, 3, 1)
-        def_end   = date(ANCHOR_YEAR, 7, 31)
+    areas_all = sorted(df["Area"].dropna().astype(str).unique().tolist()) if "Area" in df.columns else []
+    default_areas = (selected_areas or [])
+
+    # 上部：エリア選択（メイン画面）
+    sel_areas_main = st.multiselect(
+        "エリア選択（複数可）",
+        options=areas_all,
+        default=default_areas,
+        key='larv_areas_main'
+    )
+    # multiselect が None を返す環境差を吸収（None→空リスト）
+    sel_areas_main = sel_areas_main or []
+
+    if not sel_areas_main:
+        st.info("エリアを選択してください。")
+        return
+
+    years_all = sorted(df["Year"].dropna().unique().tolist())
+    latest = years_all[-1] if years_all else None
+
+    c1, c2, c3 = st.columns([1.1, 2.0, 1.0])
+    with c1:
+        years_sel = st.multiselect("表示年", years_all, default=[latest] if latest else [], key='larv_years')
+
+    # 採苗数モードと同じレンジ・既定（3/1〜7/31）
+    min_md = date(ANCHOR_YEAR, 3, 1)
+    max_md = date(ANCHOR_YEAR, 7, 31)
+    def_start = date(ANCHOR_YEAR, 3, 1)
+    def_end = date(ANCHOR_YEAR, 4, 30)
+
+    with c2:
         sel_md_start, sel_md_end = st.slider(
-            "対象期間（MM-DD）", min_value=min_md, max_value=max_md,
-            value=(def_start, def_end), format="MM-DD"
+            "対象期間（MM-DD）",
+            min_value=min_md,
+            max_value=max_md,
+            value=(def_start, def_end),
+            format="MM-DD",
+            key='larv_period'
         )
 
-        mode_b    = st.radio("グラフ種類", ["横棒（日別／実値）", "縦棒（期間／比率）"], index=0, horizontal=False)
-        max_days  = st.slider("横棒の最大表示（日数）", min_value=5, max_value=40, value=5)
+    with c3:
+        try:
+            mode_b = st.segmented_control('', options=['日別推移','期間内比率'], default='日別推移', key='larv_mode', label_visibility='collapsed')
+        except Exception:
+            mode_b = st.radio('', ['日別推移','期間内比率'], index=0, horizontal=True, key='larv_mode_radio', label_visibility='collapsed')
 
-    # スライダー入力を day-of-year へ
+    # 横棒（日別）は最大5日で固定
+    max_days = 5
+
     def to_doy(d: date) -> int:
         return pd.Timestamp(d).day_of_year
 
@@ -985,41 +1074,58 @@ def render_larvae_mode(selected_areas: List[str]):
         return (s <= e and s <= md_doy <= e) or (s > e and (md_doy >= s or md_doy <= e))
 
     if not size_ints:
-        st.info("サイズ列が見つかりません。")
+        st.info('サイズ列が見つかりません。')
         return
 
     first_bin = size_ints[0]
+
     def bin_low(s: int) -> int:
         return first_bin + ((s - first_bin) // 20) * 20
 
-    band_labels = sorted({f"{bin_low(si)}-{bin_low(si)+20}" for si in size_ints},
-                        key=lambda t: int(t.split("-")[0]))
+    band_labels = sorted({f"{bin_low(si)}-{bin_low(si)+20}" for si in size_ints}, key=lambda t: int(t.split('-')[0]))
 
     category_colors = {
-        "<200":    "#1f77b4",  # blue
-        "200-259": "#ff7f0e",  # orange
-        ">=260":   "#d62728",  # red
+        '<200': '#1f77b4',
+        '200-259': '#ff7f0e',
+        '>=260': '#d62728'
     }
+
     def band_to_category(band_label: str) -> str:
         try:
-            low = int(band_label.split("-")[0])
+            low = int(band_label.split('-')[0])
         except Exception:
-            return "<200"
-        if low < 200:            return "<200"
-        elif 200 <= low <= 259:  return "200-259"
-        else:                    return ">=260"
+            return '<200'
+        if low < 200:
+            return '<200'
+        elif 200 <= low <= 259:
+            return '200-259'
+        else:
+            return '>=260'
 
+    # ==== 表示対象日の決定（先頭 max_days 日） ==== 
+    q_days = df[df['Area'].isin(sel_areas_main)].copy()
+    if years_sel:
+        q_days = q_days[q_days['Year'].isin(years_sel)]
+    q_days = q_days[q_days['md_doy'].apply(lambda d: in_window(int(d), s_doy, e_doy))]
+
+    days_all = sorted(
+        q_days['MMDD'].astype(str).unique().tolist(),
+        key=lambda s: pd.to_datetime(f"2000-{s}").dayofyear
+    )
+    days_show = days_all[:max_days] if len(days_all) > max_days else days_all
+
+    # 横棒のX最大値（表示される日だけで最大値を評価）
     auto_max_global = 0.0
-    for area in selected_areas:
+    for area in sel_areas_main:
         df_area = filter_by_areas(df, [area])
-        q_test  = df_area.copy()
+        q_test = df_area.copy()
         if years_sel:
-            q_test = q_test[q_test["Year"].isin(years_sel)]
-        q_test = q_test[q_test["md_doy"].apply(lambda d: in_window(d, s_doy, e_doy))]
+            q_test = q_test[q_test['Year'].isin(years_sel)]
+        q_test = q_test[q_test['md_doy'].apply(lambda d: in_window(int(d), s_doy, e_doy))]
         if q_test.empty:
             continue
-        for md in q_test["MMDD"].astype(str).unique():
-            gmd = q_test[q_test["MMDD"].astype(str) == md]
+        for md in days_show:
+            gmd = q_test[q_test['MMDD'].astype(str) == md]
             if gmd.empty:
                 continue
             bins_sum = {}
@@ -1029,19 +1135,17 @@ def render_larvae_mode(selected_areas: List[str]):
             local_max = max(bins_sum.values()) if bins_sum else 0.0
             auto_max_global = max(auto_max_global, float(local_max))
 
-    with st.sidebar:
-        x_max_global = st.slider(
-            "横棒のX軸（最大値｜ラーバ全体）",
-            min_value=0.0, max_value=max(1.0, auto_max_global * 1.5),
-            value=auto_max_global, step=0.1
-        )
+    x_max_global = float(auto_max_global) if auto_max_global > 0 else 1.0
 
+    # —— ここからエリアごとの描画（サブヘッダーなし）。表は蓄積して最後にまとめて表示 ——
     tables_to_show: list[tuple[str, pd.DataFrame]] = []
 
-    for i, area in enumerate(selected_areas):
+    for i, area in enumerate(sel_areas_main):
+        # サブヘッダーは表示しない（Area: xxx の見出しは不使用）
 
         df_area = filter_by_areas(df, [area])
 
+        # 共通フィルタ（年・期間）
         q_area = df_area.copy()
         if years_sel:
             q_area = q_area[q_area["Year"].isin(years_sel)]
@@ -1049,15 +1153,15 @@ def render_larvae_mode(selected_areas: List[str]):
 
         if q_area.empty or not size_cols:
             st.info("選択条件に該当するデータがありません。")
-            if i < len(selected_areas) - 1:
-                st.markdown("---")  
+            if i < len(sel_areas_main or []) - 1:
+                st.markdown("---")  # 区切り線は維持
             continue
 
-        # ===== 縦棒（期間／比率）=====
-        if mode_b == "縦棒（期間／比率）":
+        # ===== 縦棒（期間）=====
+        if mode_b == "期間内比率":
             rows = []
             for yr, g in q_area.groupby("Year"):
-                total = g[size_cols].sum().sum()
+                total = g[size_cols].sum().sum()  # Othersは除外
                 bins_sum = {}
                 for si in size_ints:
                     b = bin_low(si)
@@ -1065,7 +1169,6 @@ def render_larvae_mode(selected_areas: List[str]):
                 for b_low in sorted(bins_sum.keys()):
                     ratio = (bins_sum[b_low] / total * 100) if total else 0.0
                     rows.append({"Year": yr, "帯": f"{b_low}-{b_low+20}", "比率%": ratio})
-
             bars_df = pd.DataFrame(rows)
             if bars_df.empty:
                 st.info("棒グラフ用データがありません。")
@@ -1073,6 +1176,7 @@ def render_larvae_mode(selected_areas: List[str]):
                 bands = sorted(bars_df["帯"].unique(), key=lambda t: int(t.split("-")[0]))
                 years_sorted = sorted(bars_df["Year"].unique())  # 古い→新しい
 
+                # 年度ごとの濃淡（不透明度）：新しい年ほど濃い
                 def opacity_for_year(yr: int) -> float:
                     if len(years_sorted) == 1:
                         return 0.95
@@ -1080,6 +1184,7 @@ def render_larvae_mode(selected_areas: List[str]):
                     frac = (i + 1) / len(years_sorted)    # 0..1
                     return min(1.0, 0.30 + 0.75 * frac)   # 0.30〜1.00
 
+                # HEX → RGBA
                 def hex_to_rgba(hex_color: str, alpha: float) -> str:
                     h = hex_color.lstrip("#")
                     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
@@ -1134,6 +1239,7 @@ def render_larvae_mode(selected_areas: List[str]):
             f"Area: {area} / 年: {', '.join(map(str, years_sel)) if years_sel else '全て'}"
         )
 
+        # ▼ 表は“作成のみ”（後でまとめて表示）
         summary_rows = []
         cols_lt200    = [str(s) for s in size_ints if s < 200]
         cols_200_259  = [str(s) for s in size_ints if 200 <= s <= 259]
@@ -1150,16 +1256,18 @@ def render_larvae_mode(selected_areas: List[str]):
                 {"サイズ": "260μm以上",  "年": yr, "合計": sum_ge260,   "割合": (sum_ge260   / total_ex_others * 100) if total_ex_others else 0.0},
             ]
 
-        priority = {"200μm未満": 0, "200-259μm": 1, "260μm以上": 2}
+        priority = {'260μm以上': 0, '200-259μm': 1, '200μm未満': 2}
         summary_df = pd.DataFrame(summary_rows, columns=["サイズ", "年", "合計", "割合"])
         if not summary_df.empty:
             summary_df["__order"] = summary_df["サイズ"].map(priority)
-            summary_df = summary_df.sort_values(["__order", "年"]).drop(columns="__order")
+            summary_df = summary_df.sort_values(['年','__order'], ascending=[False, True]).drop(columns='__order')
             tables_to_show.append((area, summary_df))
 
-        if i < len(selected_areas) - 1:
+        # エリア区切り線（維持）
+        if i < len(sel_areas_main or []) - 1:
             st.markdown("---")
 
+    # —— ページ最下段：表をまとめて描画（常時。ただし初期は折りたたみ） ——
     if tables_to_show:
         place_bg = {"200μm未満": "#e6f3ff", "200-259μm": "#fff3e0", "260μm以上": "#ffe6e6"}
 
@@ -1176,882 +1284,1922 @@ def render_larvae_mode(selected_areas: List[str]):
                     .format({"合計": "{:.1f}", "割合": "{:.1f}"})
                 )
                 st.dataframe(styled, use_container_width=True)
-
-        if i < len(selected_areas) - 1:
+        if i < len(sel_areas_main or []) - 1:
             st.markdown("---")
 
+
 # =========================
-# 採苗数モード
+# カレンダー部品（wt_test 由来）
 # =========================
-def render_scallop_mode(selected_areas: List[str]):
-    df_num  = read_csv_path(NUM_PATH)
-    df_size = read_csv_path(SIZE_PATH)
-    if (df_num is None) or (df_size is None):
-        st.warning("CSVが読み込めませんでした。")
-        st.stop()
+HEAD_LENGTH_RATIO = 0.55
+HEAD_HALF_HEIGHT_RATIO = 0.35
+SHAFT_WIDTH_PX = 4.0
+OUTLIER_TH = 4.0          # 観測なし時: corr - pred の閾値
+OUTLIER_TH_OBS = 2.0      # 観測あり時: corr - obs の閾値
+PHYS_MIN, PHYS_MAX = -1.5, 35.0
 
-    def normalize_place_col(df_):
-        if df_ is None or df_.empty:
-            return df_
-        if "Place" in df_.columns:
-            df_["Place"] = (
-                df_["Place"]
-                .fillna("unknown")
-                .astype(str)
-                .str.strip()
-                .str.lower()
-            )
-        return df_
-
-    df_num  = normalize_place_col(df_num)
-    df_size = normalize_place_col(df_size)
-
-    for d in (df_num, df_size):
-        for col in ["Drop_Date", "Monitoring_Date"]:
-            if col in d.columns:
-                d[col] = pd.to_datetime(d[col], errors="coerce")
-    for c in ["Scallop", "Mussel", "Akazara", "Other"]:
-        if c in df_num.columns:
-            df_num[c] = pd.to_numeric(df_num[c], errors="coerce")
-    for c in ["No", "Shell(mm)"]:
-        if c in df_size.columns:
-            df_size[c] = pd.to_numeric(df_size[c], errors="coerce")
-
-    with st.sidebar:
-        # 年候補（Drop_Date基準）
-        if df_num is None or df_num.empty or ("Drop_Date" not in df_num.columns):
-            years_all = []
-            latest    = None
-        else:
-            years_all = sorted(
-                pd.to_datetime(df_num["Drop_Date"], errors="coerce")
-                .dt.year.dropna().unique().tolist()
-            )
-            latest    = years_all[-1] if years_all else None
-
-        df_num_place  = normalize_place_col(read_csv_path(NUM_PATH))
-        df_size_place = normalize_place_col(read_csv_path(SIZE_PATH))
-        places_all = set()
-        if df_num_place is not None and ("Place" in df_num_place.columns):
-            places_all.update(df_num_place["Place"].dropna().unique().tolist())
-        if df_size_place is not None and ("Place" in df_size_place.columns):
-            places_all.update(df_size_place["Place"].dropna().unique().tolist())
-        preferred_order = ["unknown", "lower", "middle", "upper"]
-        places_all = sorted(
-            places_all,
-            key=lambda x: (
-                preferred_order.index(x) if x in preferred_order else len(preferred_order),
-                x,
-            ),
-        )
-
-        sel_years    = st.multiselect("表示年", options=years_all, default=[latest] if latest else [])
-        min_md       = date(ANCHOR_YEAR, 3, 1)
-        max_md       = date(ANCHOR_YEAR, 7, 31)
-        def_start    = date(ANCHOR_YEAR, 3, 1)
-        def_end      = date(ANCHOR_YEAR, 7, 31)
-        sel_md_start, sel_md_end = st.slider(
-            "対象期間", min_value=min_md, max_value=max_md,
-            value=(def_start, def_end), format="MM-DD"
-        )
-        sel_places   = st.multiselect("Place（フィルタ）", options=places_all, default=["upper","middle","lower"])
-        place_stack  = st.checkbox("グラフを Place 別に積み上げる", value=True)
-
-    def apply_filters(df, sel_years, sel_md_start=None, sel_md_end=None):
-        if df is None or len(df) == 0:
-            return df
-        if "Drop_Date" in df.columns and sel_years:
-            yy = pd.to_datetime(df["Drop_Date"], errors="coerce").dt.year
-            df = df[yy.isin(sel_years)]
-        if ("Drop_Date" in df.columns) and (sel_md_start is not None) and (sel_md_end is not None):
-            anchored = anchored_md_series(df["Drop_Date"])
-            s, e = sel_md_start, sel_md_end
-            if s <= e:
-                df = df[(anchored >= s) & (anchored <= e)]
-            else:
-                df = df[(anchored >= s) | (anchored <  e)]
-        return df
-
-    tier_color  = {"upper":"#1f77b4", "middle":"#ff7f0e", "lower":"#2ca02c", "unknown":"#7f7f7f"}
-    place_bg    = {"upper": "#e6f3ff", "middle": "#fff3e0", "lower": "#ffe6e6", "unknown": "#f0f0f0"}
-    stack_order = ["unknown","lower","middle","upper"]
-
-    for i, area in enumerate(selected_areas):
-        df_num_f0  = filter_by_areas(df_num.copy(),  [area])
-        df_size_f0 = filter_by_areas(df_size.copy(), [area])
-
-        if sel_places:
-            if ("Place" in df_num_f0.columns):
-                df_num_f0  = df_num_f0[df_num_f0["Place"].isin(sel_places)]
-            if ("Place" in df_size_f0.columns):
-                df_size_f0 = df_size_f0[df_size_f0["Place"].isin(sel_places)]
-
-        df_num_f  = apply_filters(df_num_f0.copy(),  sel_years, sel_md_start, sel_md_end)
-        df_size_f = apply_filters(df_size_f0.copy(), sel_years, sel_md_start, sel_md_end)
-        if df_num_f.empty:
-            st.info("選択条件に該当する number データがありません。")
-            if i < len(selected_areas) - 1:
-                st.markdown("---")
-            continue
-
-        n_for_max = df_num_f.dropna(subset=["Drop_Date", "Monitoring_Date"]).copy()
-        n_for_max["Drop_Date_dt"]       = pd.to_datetime(n_for_max["Drop_Date"], errors="coerce")
-        n_for_max["Monitoring_Date_dt"] = pd.to_datetime(n_for_max["Monitoring_Date"], errors="coerce")
-
-        s_for_max = df_size_f.dropna(subset=["Drop_Date","Monitoring_Date","Shell(mm)"]).copy()
-        s_for_max["Drop_Date_dt"]       = pd.to_datetime(s_for_max["Drop_Date"], errors="coerce")
-        s_for_max["Monitoring_Date_dt"] = pd.to_datetime(s_for_max["Monitoring_Date"], errors="coerce")
-
-        x2_global_max = float(
-            n_for_max.groupby(["Drop_Date_dt","Monitoring_Date_dt"])["Scallop"].sum().max()
-        ) if ("Scallop" in n_for_max.columns and not n_for_max.empty) else 0.0
-        x1_global_max = float(
-            s_for_max.groupby(["Drop_Date_dt","Monitoring_Date_dt"])["Shell(mm)"].mean().max()
-        ) if not s_for_max.empty else 0.0
-        qty_range_max  = max(1.0, x2_global_max * 1.10)
-        size_range_max = max(1.0, x1_global_max * 1.10)
-
-        with st.expander(f"投入日別｜Area: {area}", expanded=True):
-            drops_all = sorted(
-                pd.to_datetime(pd.concat([n_for_max["Drop_Date_dt"], s_for_max["Drop_Date_dt"]], ignore_index=True).dropna()).unique(),
-                reverse=True
-            )
-            if not drops_all:
-                st.info("Drop_Date がありません。")
-                continue
-
-            first_figure = True
-            for d_drop in drops_all:
-                n_g = n_for_max[n_for_max["Drop_Date_dt"] == d_drop].copy()
-                s_g = s_for_max[s_for_max["Drop_Date_dt"] == d_drop].copy()
-
-                drop_ts = pd.to_datetime(d_drop).normalize()
-                dd_str  = drop_ts.strftime('%Y-%m-%d')
-
-                md_all = pd.concat([n_g["Monitoring_Date_dt"], s_g["Monitoring_Date_dt"]], ignore_index=True).dropna()
-                md_all_ts = pd.to_datetime(md_all).dt.normalize()     # ← Series なので dt.normalize()
-                md_all_ts = md_all_ts.drop_duplicates().sort_values()
-                md_index  = pd.Index(md_all_ts)                       # reindex 等で明示的に Index 化
-
-                md_lab0   = [ts.strftime('%m-%d') for ts in md_index]
-                md_days   = [(ts - drop_ts).days for ts in md_index]
-                md_labels = [f"{lbl}（{dy}日）" for lbl, dy in zip(md_lab0, md_days)]
-
-                y_labels = md_labels
-                md_to_label = dict(zip(md_index, md_labels))
-
-                if not n_g.empty:
-                    n_g["Mon_norm"] = pd.to_datetime(n_g["Monitoring_Date_dt"]).dt.normalize()
-                if not s_g.empty:
-                    s_g["Mon_norm"] = pd.to_datetime(s_g["Monitoring_Date_dt"]).dt.normalize()
-
-                fig = go.Figure()
-
-                if ("Scallop" in n_g.columns) and (len(n_g) > 0):
-                    if place_stack and ("Place" in n_g.columns):
-                        n_agg = (
-                            n_g.groupby(["Mon_norm","Place"])["Scallop"]
-                            .sum()
-                            .reset_index()
-                        )
-                        for place_key in stack_order:
-                            g2 = n_agg[n_agg["Place"] == place_key]
-                            if g2.empty:
-                                continue
-                            s_vals = g2.set_index("Mon_norm")["Scallop"]
-                            x_vals = [float(v) for v in s_vals.reindex(md_index, fill_value=0.0).values]
-                            fig.add_trace(go.Bar(
-                                x=x_vals,
-                                y=y_labels,
-                                orientation="h",
-                                name=str(place_key),
-                                legendgroup="qty",
-                                marker=dict(
-                                    color=tier_color.get(place_key, "#7f7f7f"),
-                                    line=dict(color="#000", width=1)
-                                ),
-                                width=0.95,
-                                opacity=0.6,
-                                hovertemplate=(
-                                    f"投入日: {dd_str}<br>"
-                                    "日付: %{y}<br>"
-                                    "数量: %{x:.0f}<br>"
-                                    f"Place: {place_key}"
-                                ),
-                                xaxis="x2",
-                                showlegend=first_figure
-                            ))
-                        fig.update_layout(barmode="stack", bargap=0.05, bargroupgap=0.0)
-                    else:
-                        n_agg = (
-                            n_g.groupby(["Mon_norm"])["Scallop"]
-                            .sum()
-                            .reindex(md_index, fill_value=0.0)
-                        )
-                        x_vals = [float(v) for v in n_agg.values]
-                        fig.add_trace(go.Bar(
-                            x=x_vals,
-                            y=y_labels,
-                            orientation="h",
-                            name="Scallop",
-                            legendgroup="qty",
-                            marker=dict(color="#1f77b4", line=dict(color="#000", width=1)),
-                            width=0.95,
-                            opacity=0.6,
-                            hovertemplate=(
-                                f"投入日: {dd_str}<br>"
-                                "日付: %{y}<br>"
-                                "数量: %{x:.0f}"
-                            ),
-                            xaxis="x2",
-                            showlegend=first_figure
-                        ))
-
-                if len(s_g) > 0:
-                    if place_stack and ("Place" in s_g.columns):
-                        for place_key in stack_order:
-                            s_place = s_g[s_g["Place"] == place_key]
-                            if s_place.empty:
-                                continue
-                            s_mean = s_place.groupby("Mon_norm")["Shell(mm)"].mean()
-                            x_for_line = [float(v) if pd.notna(v) else None
-                                        for v in s_mean.reindex(md_index).values]
-                            y_for_line = y_labels
-                            fig.add_trace(go.Scatter(
-                                x=x_for_line,
-                                y=y_for_line,
-                                mode="lines+markers",
-                                name=f"Size_mean({place_key})",
-                                legendgroup="size",
-                                line=dict(color=tier_color.get(place_key, "#7f7f7f"), width=3),
-                                marker=dict(color=tier_color.get(place_key, "#7f7f7f"), size=6),
-                                hovertemplate=("サイズ: %{x:.1f} mm<br>日付: %{y}"),
-                                xaxis="x",
-                                cliponaxis=False,
-                                showlegend=first_figure
-                            ))
-                    else:
-                        s_mean = s_g.groupby("Mon_norm")["Shell(mm)"].mean()
-                        x_for_line = [float(v) if pd.notna(v) else None
-                                    for v in s_mean.reindex(md_index).values]
-                        y_for_line = y_labels
-                        fig.add_trace(go.Scatter(
-                            x=x_for_line,
-                            y=y_for_line,
-                            mode="lines+markers",
-                            name="Size_mean(mm)",
-                            legendgroup="size",
-                            line=dict(color="#d62728", width=3),
-                            marker=dict(color="#d62728", size=6),
-                            hovertemplate=("サイズ: %{x:.1f} mm<br>日付: %{y}"),
-                            xaxis="x",
-                            cliponaxis=False,
-                            showlegend=first_figure
-                        ))
-
-                fig.update_layout(
-                    plot_bgcolor="white", paper_bgcolor="white",
-                    margin=dict(l=10, r=44, t=52, b=64),
-                    font=dict(size=13, color="#222"),
-                    legend=dict(orientation="h", y=-0.18, x=0.01, font=dict(size=11)),
-                    showlegend=True,
-                    title=dict(text=f"投入日: {dd_str}", font=dict(size=16), x=0.01),
-                    hovermode="closest", legend_traceorder="normal"
-                )
-                fig.update_xaxes(
-                    title="サイズ（mm）", range=[0, size_range_max],
-                    showline=True, linecolor="#000", linewidth=1,
-                    showgrid=False, zeroline=False, automargin=True, domain=[0.0, 0.985]
-                )
-                fig.update_layout(
-                    xaxis2=dict(
-                        title="付着数合計", range=[0, qty_range_max],
-                        overlaying="x", side="top",
-                        showline=True, linecolor="#000", linewidth=1,
-                        showgrid=True, gridcolor="rgba(0,0,0,0.06)",
-                        zeroline=False, automargin=True, domain=[0.0, 0.985]
-                    )
-                )
-                fig.update_yaxes(
-                    title="", type="category",
-                    categoryorder="array", categoryarray=y_labels,
-                    showline=True, linecolor="#000", linewidth=1,
-                    gridcolor="rgba(0,0,0,0.06)", automargin=True
-                )
-
-
-                fig.update_layout(height=max(300, int(42 * len(y_labels) + 120)))
-
-                st.plotly_chart(fig, use_container_width=True)
-                first_figure = False
-
-        # ------------- 表（Place背景色：常に生成、折りたたみ） -------------
-        with st.expander("採苗数データ表（クリックで展開）", expanded=False):
-            common_keys = ["Drop_Date", "Monitoring_Date"]
-            if ("Place" in df_num_f.columns) and ("Place" in df_size_f.columns):
-                common_keys = ["Place"] + common_keys
-            common_keys = list(dict.fromkeys(common_keys))
-
-            size_mean = (
-                df_size_f.groupby(common_keys, as_index=False)["Shell(mm)"]
-                .mean()
-                .rename(columns={"Shell(mm)": "Size_mean(mm)"})
-            )
-
-            num_agg_df = (
-                df_num_f.groupby(common_keys, as_index=False, dropna=False)
-                        .agg({"Scallop": "sum"})
-            )
-            num_agg_df["Scallop"] = pd.to_numeric(num_agg_df["Scallop"], errors="coerce").astype(float)
-
-            final_df = num_agg_df.merge(size_mean, on=common_keys, how="left")
-
-            final_df["Drop_Date"]       = pd.to_datetime(final_df["Drop_Date"], errors="coerce")
-            final_df["Monitoring_Date"] = pd.to_datetime(final_df["Monitoring_Date"], errors="coerce")
-            final_df["Days"] = (final_df["Monitoring_Date"] - final_df["Drop_Date"]).dt.days
-
-            for col in ["Drop_Date", "Monitoring_Date"]:
-                final_df[col] = pd.to_datetime(final_df[col], errors="coerce").dt.strftime("%Y-%m-%d")
-
-            preferred_cols = ["Place", "Drop_Date", "Monitoring_Date", "Days", "Scallop", "Size_mean(mm)"]
-            ordered_cols = [c for c in preferred_cols if c in final_df.columns]
-            other_cols   = [c for c in final_df.columns if c not in ordered_cols]
-            final_df = final_df[ordered_cols + other_cols]
-
-            def color_by_place(row: pd.Series):
-                place = row.get("Place", "")
-                color = place_bg.get(str(place).lower(), "")
-                return [f"background-color: {color}" if color else "" for _ in row]
-
-            styled_table = (
-                final_df.style
-                .apply(color_by_place, axis=1)
-                .format({"Scallop": "{:.0f}", "Size_mean(mm)": "{:.1f}"})
-            )
-            st.dataframe(styled_table, use_container_width=True)
-
-        if i < len(selected_areas) - 1:
-            st.markdown("---")
-            
-# =========================
-# カレンダー
-# =========================
-def render_calendar_mode():
-    parent_folder_dr = pjoin(base_dir, "pred")
-    if not os.path.exists(parent_folder_dr):
-        st.error(f"フォルダが見つかりません: {parent_folder_dr}")
-        st.stop()
-    dr_files = list_dr_files_safe(base_dir)
-    if not dr_files:
-        st.warning("pred に CSV がありません")
-        st.stop()
-    selected_file = st.selectbox("対象エリア選択", sorted(dr_files))
-
-    use_correction = st.sidebar.checkbox("実測ベース補正", value=False)
-    tolerance_min = st.sidebar.slider("時刻差の許容範囲（分）", 5, 120, 35, step=5)
-    train_days = st.sidebar.slider("補正学習期間（日数）", 7, 90, 30, step=1)
-    bg_basis = st.sidebar.radio("セル背景の基準", ["予測に連動", "補正に連動"], index=0)
-    max_h_vh = st.sidebar.slider("表の最大高さ (vh)", 40, 80, 65, step=5)
-    recent_days = st.sidebar.slider("表示日数（直近）", 7, 10, 8, step=1)
-
-    df_dr = load_dr_single_file(base_dir, selected_file)
-    if df_dr.empty:
-        st.warning("データが読み込めませんでした")
-        st.stop()
-    latest_dt = df_dr["datetime"].max()
-    latest_day = latest_dt.date()
-    depths_all = sorted([int(d) for d in df_dr["depth_m"].dropna().unique()])
-
-    start_day = latest_day - pd.Timedelta(days=(recent_days - 1))
-    end_day = latest_day
-    day_list = list(pd.date_range(start_day, end_day, freq="D"))
-    df_period = df_dr[df_dr["date_day"].isin([d.date() for d in day_list])].copy()
-
-    parent_folder_obs = pjoin(base_dir, "obs")
-    df_obs_period = pd.DataFrame()
-    obs_path = pjoin(parent_folder_obs, selected_file)
-    if os.path.exists(obs_path):
-        try:
-            df_obs = pd.read_csv(obs_path)
-            df_obs["datetime"] = jst_to_naive(df_obs.get("Date"))
-            df_obs["depth_m"] = pd.to_numeric(df_obs.get("Depth"), errors="coerce").round(0).astype("Int64")
-            if ("U" in df_obs.columns) and ("V" in df_obs.columns):
-                df_obs["U"] = pd.to_numeric(df_obs["U"], errors="coerce")
-                df_obs["V"] = pd.to_numeric(df_obs["V"], errors="coerce")
-                df_obs["Speed"] = np.sqrt(np.square(df_obs["U"]) + np.square(df_obs["V"]))
-                df_obs["Direction_deg"] = (np.degrees(np.arctan2(df_obs["U"], df_obs["V"])) + 360.0) % 360.0
-            df_obs = df_obs.dropna(subset=["datetime", "depth_m"]).copy()
-            df_obs["date_day"] = df_obs["datetime"].dt.date
-            df_obs_period = df_obs[df_obs["date_day"].isin([d.date() for d in day_list])].copy()
-        except Exception as e:
-            st.warning(f"読み込みに失敗: {obs_path} ({e})")
-    else:
-        st.info("実測データがありません。矢印は予測値です。")
-
-    reg_depthwise, n_match_reg = None, None
-    if use_correction:
-        train_start_dt = pd.Timestamp(latest_day) - pd.Timedelta(days=train_days)
-        train_end_dt = pd.Timestamp(latest_day) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-        with st.spinner(
-            f"回帰補正パラメータ算出中（{selected_file}, 終端={latest_day:%Y-%m-%d}, 遡り{train_days}日）..."
-        ):
-            reg_depthwise, n_match_reg = compute_depthwise_regression(
-                base_dir, selected_file, tolerance_min,
-                start_dt=train_start_dt, end_dt=train_end_dt, min_pairs=5
-            )
-        if reg_depthwise is None:
-            st.warning("回帰係数の算出に失敗（一致データ不足など）。補正なしで表示。")
-            use_correction = False
-        else:
-            with st.expander("補正の学習情報", expanded=False):
-                st.write(f"期間: {train_start_dt:%Y-%m-%d} 〜 {train_end_dt:%Y-%m-%d}")
-                st.write("一致ペア数:", {int(k): int(v) for k, v in (n_match_reg or {}).items()})
-                st.write("学習済み水深（α, β）:", {int(k): (round(v[0],4), round(v[1],4)) for k, v in (reg_depthwise or {}).items()})
-
-    # ---- CSS / 色 ----
-    def get_calendar_css(max_h_vh: int) -> str:
-        return f"""
-<style>
-.calendar-scroll-container {{
-overflow: auto; max-height: {max_h_vh}vh; max-width: 100%;
--webkit-overflow-scrolling: touch; border:1px solid #e5e5e5; border-radius:8px; background:#fff;
-}}
-.calendar-table {{ border-collapse:collapse; width:max-content; min-width:640px; font-size:14px; font-family:'Noto Sans JP','Roboto',sans-serif; }}
-.calendar-table th, .calendar-table td {{ padding:6px 10px; border-bottom:1px solid #eee; vertical-align:top; line-height:1.2; text-align:center; }}
-.calendar-table thead th {{ position:sticky; top:0; background:#fafafa; z-index:2; white-space:nowrap; }}
-.calendar-table td.depth-cell, .calendar-table thead th:first-child {{ position:sticky; left:0; background:#f7f7f7; z-index:3; min-width:40px; font-weight:600; }}
-.pred-small {{ font-size:12px; color:#555; }}
-@media (max-width:480px) {{ .calendar-table {{ font-size:13px; }} .calendar-table td.depth-cell {{ min-width:30px; }} }}
-</style>
+def get_arrow_svg(direction_deg, speed_mps):
+    if pd.isna(speed_mps) or pd.isna(direction_deg):
+        return ""
+    css_angle = (direction_deg - 90) % 360
+    def _style(s):
+        if np.isnan(s): return 18, "#CCCCCC"
+        speed_kt = s * 1.94384
+        if speed_kt < 1.0: return 18, "#0000FF"
+        elif speed_kt < 2.0: return 22, "#FFC107"
+        else: return 26, "#FF0000"
+    size, color = _style(speed_mps)
+    head_length = size * HEAD_LENGTH_RATIO
+    head_half_h = size * HEAD_HALF_HEIGHT_RATIO
+    line_end = size - head_length
+    return f"""
+<svg width="{size}" height="{size}" style="display:block;margin:0 auto;transform:rotate({css_angle}deg);">
+  <line x1="4" y1="{size/2}" x2="{line_end}" y2="{size/2}"
+        stroke="{color}" stroke-width="{SHAFT_WIDTH_PX}" stroke-linecap="round"/>
+  <polygon points="{line_end},{size/2 - head_half_h} {size},{size/2} {line_end},{size/2 + head_half_h}"
+           fill="{color}"/>
+</svg>
 """.strip()
 
-    def get_color(temp: float, t_min: float = 5, t_max: float = 25) -> str:
-        if pd.isna(temp):
-            return "rgba(220,220,220,0.6)"
-        ratio = (float(temp) - t_min) / (t_max - t_min)
-        ratio = max(0, min(1, ratio))
-        if ratio < 0.5:
-            r = int(240 * ratio * 2); g = int(240 * ratio * 2); b = 240
-        else:
-            r = 240; g = int(240 * (1 - (ratio - 0.5) * 2)); b = int(240 * (1 - (ratio - 0.5) * 2))
-        return f"rgba({r},{g},{b},0.4)"
+def get_color(temp: float, t_min: float = 0.0, t_max: float = 25.0) -> str:
+    if pd.isna(temp): return "rgba(220,220,220,0.4)"
+    ratio = (float(temp) - t_min) / (t_max - t_min)
+    ratio = max(0, min(1, ratio))
+    if ratio < 0.5:
+        r = int(240 * ratio * 2); g = int(240 * ratio * 2); b = 240
+    else:
+        r = 240; g = int(240 * (1 - (ratio - 0.5) * 2)); b = int(240 * (1 - (ratio - 0.5) * 2))
+    return f"rgba({r},{g},{b},0.4)"
 
-    def get_arrow_svg(direction_deg, speed_mps):
-        if direction_deg is None or speed_mps is None or pd.isna(direction_deg) or pd.isna(speed_mps):
-            return ""
-        css_angle = (float(direction_deg) - 90.0) % 360.0
+def get_calendar_css(max_h_vh: int = 65) -> str:
+    return f"""
+    <style>
+    .calendar-scroll-container {{
+      overflow-x: auto; overflow-y: auto;
+      max-height: {max_h_vh}vh; max-width: 100%;
+      -webkit-overflow-scrolling: touch;
+      border: 1px solid #e5e5e5; border-radius: 8px;
+      isolation: isolate;
+    }}
+    .calendar-table {{
+      border-collapse: separate; border-spacing: 0;
+      width: max-content; min-width: 640px; font-size: 14px;
+    }}
+    .calendar-table th, .calendar-table td {{
+      padding: 6px 10px;
+      border-bottom: 1px solid #eee;
+      text-align: center;
+      white-space: nowrap;
+    }}
+    thead th {{
+      position: sticky; top: 0;
+      background: #fafafa; z-index: 2;
+    }}
+    .calendar-table tbody th.depth-cell,
+    .calendar-table tbody td.depth-cell {{
+      position: sticky; left: 0;
+      background: #f7f7f7; z-index: 3;
+      min-width: 56px; text-align: center; font-weight: 700 !important;
+    }}
+    thead th:first-child {{
+      position: sticky; left: 0; top: 0;
+      background: #f0f0f0; z-index: 4; min-width: 56px; text-align: center; font-weight: 700;
+    }}
+    .calendar-table .pred-small {{ font-size: 12px; color: #555; }}
+    </style>
+    """.strip()
+
+def correction_effective(
+    temp_pred: Optional[float],
+    temp_corr: Optional[float],
+    temp_obs: Optional[float] = None
+) -> bool:
+    if temp_pred is None or pd.isna(temp_pred): return False
+    if temp_corr is None or pd.isna(temp_corr): return False
+    if not (PHYS_MIN < float(temp_corr) < PHYS_MAX): return False
+    if not (TEMP_MIN < float(temp_corr) < TEMP_MAX): return False
+    if (temp_obs is not None) and (not pd.isna(temp_obs)):
+        return abs(float(temp_corr) - float(temp_obs)) < OUTLIER_TH_OBS
+    else:
+        return abs(float(temp_corr) - float(temp_pred)) < OUTLIER_TH
+
+def render_cell_html(
+    temp_pred: Optional[float],
+    speed_mps: Optional[float],
+    dir_deg: Optional[float],
+    temp_corr_raw: Optional[float],
+    corr_on: bool,
+    temp_obs: Optional[float] = None,
+) -> str:
+    corr_ok = corr_on and correction_effective(temp_pred, temp_corr_raw, temp_obs=temp_obs)
+    bg_value = float(temp_corr_raw) if corr_ok else (float(temp_pred) if temp_pred is not None else np.nan)
+    bg_color = get_color(bg_value) if not pd.isna(bg_value) else "rgba(220,220,220,0.6)"
+    pred_label = f"{float(temp_pred):.1f}°C" if (temp_pred is not None and not pd.isna(temp_pred)) else "NaN"
+    pred_html = f"<span class='pred-small'>{pred_label}</span>"
+
+    speed_html, arrow_html = "", ""
+    if (speed_mps is not None and not pd.isna(speed_mps)) and (dir_deg is not None and not pd.isna(dir_deg)):
         speed_kt = float(speed_mps) * 1.94384
-        if speed_kt < 1.0:
-            size, color = 18, "#0000FF"
-        elif speed_kt < 2.0:
-            size, color = 22, "#FFC107"
+        speed_html = f"<span style='font-size:12px;color:#444;'>{speed_kt:.1f} kt</span>"
+        arrow_html = f"<span style='display:block;line-height:1;margin:0;padding:0;'>{get_arrow_svg(float(dir_deg), float(speed_mps))}</span>"
+
+    corr_html = ""
+    if corr_on and (temp_corr_raw is not None) and not pd.isna(temp_corr_raw) and corr_ok:
+        corr_html = f"<span style='color:#D32F2F;font-weight:700;font-size:14px;'>{float(temp_corr_raw):.1f}°C</span>"
+
+    content = (
+        "<div style='display:flex;flex-direction:column;align-items:center;gap:2px;'>"
+        + pred_html + speed_html + arrow_html + corr_html + "</div>"
+    )
+    return f"<td style='background:{bg_color}'>{content}</td>"
+
+def build_weekly_table_html(df_period: pd.DataFrame, day_list: List[pd.Timestamp], depths: List[int], corr_on: bool) -> str:
+    times = [d.strftime('%m/%d') for d in day_list]
+    html = (
+        '<div class="calendar-scroll-container"><table class="calendar-table">'
+        "<thead><tr><th>水深</th>" + "".join([f"<th>{t}</th>" for t in times]) + "</tr></thead><tbody>"
+    )
+    for depth in depths:
+        html += f"<tr><td class='depth-cell'>{depth}m</td>"
+        for day in day_list:
+            g = df_period[(df_period["date_day"] == day.date()) & (df_period["depth_m"] == depth)]
+            if not g.empty:
+                target_dt = pd.Timestamp(day.date()) + pd.Timedelta(hours=12)
+                row = g.assign(_diff=(g["datetime"] - target_dt).abs()).sort_values("_diff").iloc[[0]]
+                temp_ark = row
+                temp_pred = float(temp_ark["pred_temp"].values[0]) if "pred_temp" in temp_ark.columns else np.nan
+                speed_val = float(temp_ark["Speed"].values[0]) if "Speed" in temp_ark.columns else np.nan
+                dir_val = float(temp_ark["Direction_deg"].values[0]) if "Direction_deg" in temp_ark.columns else np.nan
+                temp_corr = float(temp_ark["corr_temp"].values[0]) if "corr_temp" in temp_ark.columns else None
+                temp_obs = float(temp_ark["obs_temp"].values[0]) if ("obs_temp" in temp_ark.columns and not pd.isna(temp_ark["obs_temp"].values[0])) else None
+                html += render_cell_html(temp_pred, speed_val, dir_val, temp_corr, corr_on, temp_obs=temp_obs)
+            else:
+                html += "<td>-</td>"
+        html += "</tr>\n"
+    html += "</tbody></table></div>"
+    return html
+
+def build_daily_table_html(df_day: pd.DataFrame, depths: List[int], corr_on: bool) -> str:
+    hours_list = sorted(df_day["datetime"].dt.floor("h").unique())
+    times_hr = [t.strftime('%H:%M') for t in hours_list]
+    html = (
+        '<div class="calendar-scroll-container"><table class="calendar-table">'
+        "<thead><tr><th>水深</th>" + "".join([f"<th>{t}</th>" for t in times_hr]) + "</tr></thead><tbody>"
+    )
+    for depth in depths:
+        html += f"<tr><td class='depth-cell'>{depth}m</td>"
+        for t_obj in hours_list:
+            row = df_day[(df_day["datetime"].dt.floor("h") == t_obj) & (df_day["depth_m"] == depth)]
+            if not row.empty:
+                temp_pred = float(row["pred_temp"].values[0]) if "pred_temp" in row.columns else np.nan
+                speed_val = float(row["Speed"].values[0]) if "Speed" in row.columns else np.nan
+                dir_val = float(row["Direction_deg"].values[0]) if "Direction_deg" in row.columns else np.nan
+                temp_corr = float(row["corr_temp"].values[0]) if "corr_temp" in row.columns else None
+                temp_obs = float(row["obs_temp"].values[0]) if ("obs_temp" in row.columns and not pd.isna(row["obs_temp"].values[0])) else None
+                html += render_cell_html(temp_pred, speed_val, dir_val, temp_corr, corr_on, temp_obs=temp_obs)
+            else:
+                html += "<td>-</td>"
+        html += "</tr>\n"
+    html += "</tbody></table></div>"
+    return html
+
+def make_layer_groups(depths: List[int]) -> Dict[str, List[int]]:
+    if not depths:
+        return {"表層": [], "中層": [], "底層": []}
+    d_sorted = sorted(depths); n = len(d_sorted)
+    if n <= 3:
+        top = d_sorted[:1]
+        mid = d_sorted[1:2] if n >= 2 else []
+        bot = d_sorted[2:] if n >= 3 else (d_sorted[-1:] if n >= 1 else [])
+    elif n in (4, 5):
+        top = d_sorted[:2]; mid = d_sorted[2:3]; bot = d_sorted[3:]
+    else:
+        top = d_sorted[:2]; bot = d_sorted[-2:]
+        mid = [d for d in d_sorted if d not in top + bot]
+        if len(mid) >= 3:
+            c = len(mid) // 2
+            mid = mid[c-1:c+1]
+    return {"表層": top, "中層": mid, "底層": bot}
+
+def summarize_weekly_for_depth(layer_name: str, target_depth: int, df_period: pd.DataFrame) -> Optional[str]:
+    """
+    指定した 'target_depth' 1本だけで週間コメントを作る。
+    corr_temp があれば優先、無ければ pred_temp を使う。
+    """
+    if df_period.empty or "depth_m" not in df_period.columns:
+        return None
+    g = df_period[df_period["depth_m"] == int(target_depth)].sort_values("datetime")
+    if g.empty:
+        return None
+
+    series = _pick_series_corr_then_pred(g)
+    if series is None:
+        return None
+
+    dfz = g.assign(val=pd.to_numeric(series, errors="coerce"))
+    dfz = dfz[(dfz["val"] > PHYS_MIN) & (dfz["val"] < PHYS_MAX)].dropna(subset=["val"])
+    if dfz.empty:
+        return None
+    if "date_day" not in dfz.columns:
+        dfz["date_day"] = dfz["datetime"].dt.date
+
+    daily = (
+        dfz.groupby("date_day", as_index=False)["val"]
+        .median()
+        .sort_values("date_day")
+    )
+    temps = daily["val"]
+    if temps.empty:
+        return None
+
+    rng_th = float(RANGE_STABLE)
+    dlt_th = float(DELTA_THRESH)
+
+    t_min, t_max = float(temps.min()), float(temps.max())
+    if t_max >= HIGH_TEMP_TH:
+        tag = f":red[高水温]（{t_min:.1f}℃～{t_max:.1f}℃）"
+        return f"**{layer_name}**： {int(target_depth)}m{tag}"
+
+    weekly_range = t_max - t_min
+    if weekly_range < rng_th:
+        t_start = float(temps.iloc[0])
+        tag = f"安定（{t_start:.1f}℃）"
+        return f"**{layer_name}**： {int(target_depth)}m{tag}"
+
+    n = len(temps)
+    idx_first = [i for i in [0, 1, 2] if i < n]
+    idx_last = [i for i in [4, 5, 6] if i < n]
+    first = temps.iloc[idx_first] if idx_first else temps.iloc[:max(1, n // 2)]
+    last  = temps.iloc[idx_last]  if idx_last  else temps.iloc[max(1, n // 2):]
+    delta = float(last.mean() - first.mean())
+
+    first_mean = float(first.mean()); last_mean = float(last.mean())
+    def payload_arrow() -> str: return f"{first_mean:.1f}℃→{last_mean:.1f}℃"
+    def payload_range() -> str: return f"{t_min:.1f}–{t_max:.1f}℃"
+    def payload() -> str: return payload_arrow() if DISPLAY_MODE == "arrow" else payload_range()
+
+    if delta > +dlt_th:
+        tag = f"上昇（{payload()}）"
+    elif delta < -dlt_th:
+        tag = f"下降（{payload()}）"
+    else:
+        t_start = float(temps.iloc[0]); t_end = float(temps.iloc[-1])
+        end_diff = t_end - t_start
+        if abs(end_diff) >= dlt_th:
+            tag = f"{'上昇' if end_diff > 0 else '下降'}（{payload()}）"
         else:
-            size, color = 26, "#FF0000"
-        HEAD_LENGTH_RATIO = 0.55; HEAD_HALF_HEIGHT_RATIO = 0.35; SHAFT_WIDTH_PX = 4.0
-        head_len = size * HEAD_LENGTH_RATIO
-        head_half = size * HEAD_HALF_HEIGHT_RATIO
-        line_end = size - head_len
-        return (
-            f"<svg width='{size}' height='{size}' style='display:block;margin:0 auto;transform:rotate({css_angle}deg);'>"
-            f"<line x1='4' y1='{size/2}' x2='{line_end}' y2='{size/2}' stroke='{color}' stroke-width='{SHAFT_WIDTH_PX}' stroke-linecap='round'/>"
-            f"<polygon points='{line_end},{size/2 - head_half} {size},{size/2} {line_end},{size/2 + head_half}' fill='{color}'/></svg>"
+            tag = f"安定（{payload()}）"
+    return f"**{layer_name}**： {int(target_depth)}m{tag}"
+
+def pick_shallow_mid_deep_min10_from_depths(depths: List[int]) -> List[int]:
+    """
+    利用可能な深さの配列から、浅・中・深の3層代表を返す（10m起算）。
+    - 浅: 10m以上の最小値。なければ最浅。
+    - 深: 最深。
+    - 中: 浅と深の中間の順位（偶数は下側）。
+    - 候補が2以下なら、その分だけ返す。
+    """
+    if not depths:
+        return []
+    xs = sorted(set(int(d) for d in depths))
+    n = len(xs)
+    if n <= 2:
+        return xs
+    low_idx = 0
+    for i, d in enumerate(xs):
+        if d >= 10:
+            low_idx = i
+            break
+    high_idx = n - 1
+    mid_idx = (low_idx + high_idx) // 2
+    chosen = [xs[low_idx], xs[mid_idx], xs[high_idx]]
+    return sorted(set(chosen))
+
+def summarize_weekly_layer_temp(layer_name: str, layer_depths: List[int], df_period: pd.DataFrame) -> Optional[str]:
+    if not layer_depths or df_period.empty or "depth_m" not in df_period.columns:
+        return None
+    valid_depths = set(pd.to_numeric(df_period["depth_m"], errors="coerce").dropna().astype(int))
+    depths_in_data = sorted(int(d) for d in layer_depths if int(d) in valid_depths)
+    if not depths_in_data:
+        return None
+    smd = pick_shallow_mid_deep_min10_from_depths(depths_in_data)
+    if not smd:
+        return None
+    if layer_name == "表層":
+        target_depth = smd[0]
+    elif layer_name == "中層":
+        target_depth = smd[min(1, len(smd)-1)]
+    else:
+        target_depth = smd[-1]
+    return summarize_weekly_for_depth(layer_name, target_depth, df_period)
+
+def dir_to_8pt_jp(deg: float) -> str:
+    if pd.isna(deg): return ""
+    dirs = ["北", "北東", "東", "南東", "南", "南西", "西", "北西"]
+    idx = int(((float(deg) + 22.5) % 360) // 45)
+    return dirs[idx]
+
+def speed_class_from_mps(v_mps: Optional[float]) -> str:
+    if v_mps is None or pd.isna(v_mps): return ""
+    kt = float(v_mps) * 1.94384
+    if kt >= 1.5: return "速"
+    if kt >= 0.5: return "中"
+    return "穏"
+
+def summarize_daily_layer_flow(
+    layer_name: str,
+    layer_depths: List[int],
+    df_day: pd.DataFrame,
+    use_short_labels: bool = True,
+    merge_same_segments: bool = False
+) -> Optional[str]:
+    if not layer_depths: return None
+    DAY_BINS = [("朝", 4, 6), ("昼", 11, 13), ("夕", 16, 18)]
+    order = {"朝": 0, "昼": 1, "夕": 2}
+    rows: List[Tuple[str, str, str]] = []
+    for label, h0, h1 in DAY_BINS:
+        g = df_day[(df_day["depth_m"].isin(layer_depths)) & (df_day["datetime"].dt.hour.between(h0, h1))]
+        if g.empty: continue
+        U_mean = g["U"].mean() if "U" in g.columns else np.nan
+        V_mean = g["V"].mean() if "V" in g.columns else np.nan
+        if pd.notna(U_mean) and pd.notna(V_mean):
+            speed_mean = float(np.sqrt(U_mean**2 + V_mean**2))
+            dir_deg_mean = (np.degrees(np.arctan2(U_mean, V_mean)) + 360.0) % 360.0
+        else:
+            D = g["Direction_deg"].dropna() if "Direction_deg" in g.columns else pd.Series(dtype=float)
+            if D.empty: continue
+            rad = np.deg2rad(D.values)
+            C = np.cos(rad).mean(); S = np.sin(rad).mean()
+            dir_deg_mean = (np.degrees(np.arctan2(S, C)) + 360.0) % 360.0
+            speed_mean = g["Speed"].mean() if "Speed" in g.columns else np.nan
+        d_txt = dir_to_8pt_jp(dir_deg_mean) if pd.notna(dir_deg_mean) else ""
+        v_cls = speed_class_from_mps(speed_mean) if pd.notna(speed_mean) else ""
+        if use_short_labels and v_cls:
+            v_map = {"穏やか": "穏", "中程度": "中", "速い": "速"}
+            v_cls = v_map.get(v_cls, v_cls)
+        if d_txt or v_cls:
+            rows.append((label, d_txt, v_cls))
+    if not rows: return None
+
+    segments: List[str] = []
+    if merge_same_segments:
+        bucket: Dict[Tuple[str, str], List[str]] = {}
+        for lbl, d, v in rows: bucket.setdefault((d, v), []).append(lbl)
+        for (d, v), lbls in bucket.items():
+            lbls_sorted = sorted(lbls, key=lambda x: order.get(x, 99))
+            inner = "・".join([x for x in [d, v] if x])
+            segments.append(f"{'・'.join(lbls_sorted)}（{inner}）")
+    else:
+        rows_sorted = sorted(rows, key=lambda r: order.get(r[0], 99))
+        for lbl, d, v in rows_sorted:
+            inner = "・".join([x for x in [d, v] if x])
+            segments.append(f"{lbl}（{inner}）")
+    return f"**{layer_name}**： " + "／".join(segments)
+
+
+
+# =========================
+# 予測カレンダー（wt_test 同等仕様）
+# - corr は data/corr の <name>_corr.csv を優先
+# - 列名揺れ（CorrTemp 等）を吸収
+# =========================
+BASE_DIR = base_dir
+PRED_DIR = "pred"
+OBS_DIR = "obs"
+CORR_DIR = "corr"
+
+# 固定パラメータ
+RECENT_DAYS = 7           # 直近8日（週間） ※本コードでは8日固定を計算式で表現
+OUTLIER_TH = 4.0          # 観測なし時: corr - pred の閾値
+OUTLIER_TH_OBS = 2.0      # 観測あり時: corr - obs の閾値
+OBS_MATCH_TOL_MIN = 60    # 観測近傍マージ許容（分）
+CORR_MATCH_TOL_MIN = 60   # 補正近傍マージ許容（分）
+TEMP_MIN, TEMP_MAX = -2.0, 40.0
+PHYS_MIN, PHYS_MAX = -1.5, 35.0
+HIGH_TEMP_TH = 22.0       # コメント用
+RANGE_STABLE = 0.5
+DELTA_THRESH = 0.3
+DISPLAY_MODE = "arrow"
+
+# === 追加：今日（JST）基準と“未来8日”ウィンドウの明示フラグ ===
+WEEK_WINDOW_FORWARD = True  # True: 今日→先7日（計8日）、False: 過去7日→今日（計8日）
+
+def pjoin(*parts: str) -> str:
+    return os.path.normpath(os.path.join(*parts))
+
+# =========================================
+# ユーティリティ
+# =========================================
+def _pick_series_corr_then_pred(g: pd.DataFrame) -> Optional[pd.Series]:
+    """
+    corr が列として存在し、かつ有効値が1つ以上あれば corr を採用。
+    そうでなければ pred。どちらもダメなら None。
+    """
+    cand = None
+    if "corr_temp" in g.columns:
+        c = pd.to_numeric(g["corr_temp"], errors="coerce")
+        if c.notna().sum() >= 1:
+            cand = c
+    if cand is None and "pred_temp" in g.columns:
+        p = pd.to_numeric(g["pred_temp"], errors="coerce")
+        if p.notna().sum() >= 1:
+            cand = p
+    return cand
+def utc_to_jst_naive(s: pd.Series) -> pd.Series:
+    """UTCとして解釈 → JSTへ変換 → タイムゾーン情報を外す（naive）"""
+    dt = pd.to_datetime(s, errors="coerce", utc=True)
+    dt = dt.dt.tz_convert("Asia/Tokyo").dt.tz_localize(None)
+    return dt
+def jst_to_naive(s: pd.Series) -> pd.Series:
+    """ローカル／JST相当の文字列→pandas日時→（もしtz付きなら）JSTへ変換→naive化"""
+    dt = pd.to_datetime(s, errors="coerce", utc=False)
+    if getattr(dt.dt, "tz", None) is not None:
+        dt = dt.dt.tz_convert("Asia/Tokyo").dt.tz_localize(None)
+    return dt
+def safe_merge_asof_by_depth_keep_left(
+    left: pd.DataFrame,
+    right: pd.DataFrame,
+    tolerance: pd.Timedelta,
+    right_value_cols: List[str],
+    suffixes: Tuple[str, str] = ("_x", "_y"),
+) -> pd.DataFrame:
+    """
+    depth_m ごとに nearest で asof マージする。
+    右側にデータが無い深さは NaN をパディング、左側の行は保持（keep-left）。
+    """
+    out_list: List[pd.DataFrame] = []
+    left_depths = sorted(set(left["depth_m"].dropna().unique()))
+    for d in left_depths:
+        l = left[left["depth_m"] == d].sort_values("datetime")
+        r = right[right["depth_m"] == d].sort_values("datetime")[["datetime", "depth_m"] + right_value_cols]
+        if l.empty:
+            continue
+        if r.empty:
+            pad = l.copy()
+            for c in right_value_cols:
+                pad[c] = np.nan
+            out_list.append(pad)
+        else:
+            merged = pd.merge_asof(
+                l, r, on="datetime", by="depth_m",
+                tolerance=tolerance, direction="nearest", suffixes=suffixes
+            )
+            out_list.append(merged)
+    if not out_list:
+        out = left.copy()
+        for c in right_value_cols:
+            if c not in out.columns:
+                out[c] = np.nan
+        return out
+    return pd.concat(out_list, ignore_index=True)
+def _detect_column(df: pd.DataFrame, keywords: List[str]) -> Optional[str]:
+    """
+    ['corr','temp'] のようなキーワード候補から最も合致する列名を推定する。
+    完全一致 → 正規化（_除去・小文字化）包含 の順で探索。
+    """
+    cols = list(df.columns)
+    # 完全一致
+    for c in cols:
+        if c.lower() in [k.lower() for k in keywords]:
+            return c
+    # 正規化（_ 除去）
+    norm = {c: c.lower().replace("_", "") for c in cols}
+    for c, n in norm.items():
+        ok = all(k.lower().replace("_", "") in n for k in keywords)
+        if ok:
+            return c
+    return None
+def to_rgba(color: str, alpha: float = 0.18) -> str:
+    """
+    '#rrggbb' / 'rgb(r,g,b)' / 'rgba(r,g,b,a)' を RGBA 文字列に正規化し、alpha を差し替える。
+    不正値は緑系のデフォルトを返す。
+    """
+    if not isinstance(color, str) or not color:
+        return f"rgba(0,150,0,{alpha})"
+    c = color.strip().lower()
+    if c.startswith("rgba(") and c.endswith(")"):
+        try:
+            nums = c[5:-1].split(",")
+            r, g, b = [int(float(x)) for x in nums[:3]]
+            return f"rgba({r},{g},{b},{alpha})"
+        except Exception:
+            return f"rgba(0,150,0,{alpha})"
+    if c.startswith("rgb(") and c.endswith(")"):
+        try:
+            r, g, b = [int(float(x)) for x in c[4:-1].split(",")[:3]]
+            return f"rgba({r},{g},{b},{alpha})"
+        except Exception:
+            return f"rgba(0,150,0,{alpha})"
+    if c.startswith("#"):
+        h = c.lstrip("#")
+        try:
+            if len(h) == 3:
+                r = int(h[0]*2, 16); g = int(h[1]*2, 16); b = int(h[2]*2, 16)
+            elif len(h) == 6:
+                r = int(h[0:2], 16); g = int(h[2:4], 16); b = int(h[4:6], 16)
+            else:
+                return f"rgba(0,150,0,{alpha})"
+            return f"rgba({r},{g},{b},{alpha})"
+        except Exception:
+            return f"rgba(0,150,0,{alpha})"
+    return c
+
+# ---- キャッシュ無効化用：ファイル指紋 ----
+def file_fingerprint(path: str) -> str:
+    """
+    任意パスの存在/mtime/サイズを文字列化（キャッシュキー用）。
+    存在しなければ 'missing'。
+    """
+    p = Path(path)
+    if not p.exists():
+        return "missing"
+    try:
+        st_ = p.stat()
+        return f"mtime:{int(st_.st_mtime)}:size:{st_.st_size}"
+    except Exception:
+        return "exists"
+def obs_fingerprint(base_dir: str, obs_dir: str, filename: str) -> str:
+    path = os.path.normpath(os.path.join(base_dir, obs_dir, filename))
+    return file_fingerprint(path)
+
+# =========================================
+# ローダ（fp をキーに追加）
+# =========================================
+@st.cache_data(show_spinner=False)
+def load_pred(filename: str, fp: str = "") -> pd.DataFrame:
+    """
+    予測（pred）CSV を読み込む。
+    fp はキャッシュキー用（中身では使わない）。
+    """
+    path = pjoin(BASE_DIR, PRED_DIR, filename)
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(path, encoding="utf-8")
+    except Exception:
+        return pd.DataFrame()
+    df.columns = [c.strip() for c in df.columns]
+    df["datetime"] = utc_to_jst_naive(df.get("Date"))
+    df["depth_m"] = pd.to_numeric(df.get("Depth"), errors="coerce").round(0).astype("Int64")
+    df = df.rename(columns={"Temp": "pred_temp"})
+    if ("U" in df.columns) and ("V" in df.columns):
+        df["U"] = pd.to_numeric(df["U"], errors="coerce")
+        df["V"] = pd.to_numeric(df["V"], errors="coerce")
+        df["Speed"] = np.sqrt(np.square(df["U"]) + np.square(df["V"]))
+        df["Direction_deg"] = (np.degrees(np.arctan2(df["U"], df["V"])) + 360.0) % 360.0
+    df = df.dropna(subset=["datetime", "depth_m"]).copy()
+    df["date_day"] = df["datetime"].dt.date
+    return df
+
+@st.cache_data(show_spinner=False)
+def load_corr_for(filename: str, fp: str = "") -> pd.DataFrame:
+    """
+    補正（corr）CSV を読み込む（<name>_corr.csv）。
+    fp はキャッシュキー用（中身では使わない）。
+    """
+    name, ext = os.path.splitext(filename)
+    corr_filename = f"{name}_corr{ext}"
+    path = pjoin(BASE_DIR, CORR_DIR, corr_filename)
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(path, encoding="utf-8")
+    except Exception:
+        return pd.DataFrame()
+    df.columns = [c.strip() for c in df.columns]
+    df["datetime"] = jst_to_naive(df.get("Date"))
+    df["depth_m"] = pd.to_numeric(df.get("Depth"), errors="coerce").round(0).astype("Int64")
+    corr_col = _detect_column(df, ["corr", "temp"]) or ("CorrTemp" if "CorrTemp" in df.columns else None)
+    if corr_col is None:
+        corr_col = "Temp" if "Temp" in df.columns else None
+    if corr_col is None:
+        return pd.DataFrame()
+    low_col  = _detect_column(df, ["corr", "low"])  or ("CorrLow"  if "CorrLow"  in df.columns else None)
+    high_col = _detect_column(df, ["corr", "high"]) or ("CorrHigh" if "CorrHigh" in df.columns else None)
+    rename_map = {corr_col: "corr_temp"}
+    if low_col:  rename_map[low_col]  = "corr_low"
+    if high_col: rename_map[high_col] = "corr_high"
+    df = df.rename(columns=rename_map)
+    keep = ["datetime", "depth_m", "corr_temp"]
+    if "corr_low" in df.columns:  keep.append("corr_low")
+    if "corr_high" in df.columns: keep.append("corr_high")
+    df = df[keep].dropna(subset=["datetime", "depth_m", "corr_temp"]).copy()
+    df["date_day"] = df["datetime"].dt.date
+    return df
+
+@st.cache_data(show_spinner=False)
+def load_obs_for(filename: str, fp: str = "") -> pd.DataFrame:
+    """
+    観測（obs）CSV を読み込む。
+    fp はキャッシュキー用（中身では使わない）。
+    """
+    path = pjoin(BASE_DIR, OBS_DIR, filename)
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(path, encoding="utf-8")
+    except Exception:
+        return pd.DataFrame()
+    df.columns = [c.strip() for c in df.columns]
+    df["datetime"] = jst_to_naive(df.get("Date"))
+    df["depth_m"] = pd.to_numeric(df.get("Depth"), errors="coerce").round(0).astype("Int64")
+    df = df.rename(columns={"Temp": "obs_temp"})
+    df = df.dropna(subset=["datetime", "depth_m"]).copy()
+    df["date_day"] = df["datetime"].dt.date
+    return df
+def add_corr(df_pred: pd.DataFrame, df_corr: pd.DataFrame) -> pd.DataFrame:
+    """
+    pred へ corr を depth_m&datetime で近傍（±CORR_MATCH_TOL_MIN 分）マージし、
+    corr_temp（＋あれば corr_low / corr_high）を付加する。
+    corr が空なら pred の行をそのまま返し、corr_* 列だけ NaN で補う。
+    """
+    if df_pred.empty or df_corr.empty:
+        out = df_pred.copy()
+        if "corr_temp" not in out.columns:
+            out["corr_temp"] = np.nan
+        if "corr_low" not in out.columns:
+            out["corr_low"] = np.nan
+        if "corr_high" not in out.columns:
+            out["corr_high"] = np.nan
+        return out
+
+    tol = pd.Timedelta(minutes=CORR_MATCH_TOL_MIN)
+    right_cols = ["corr_temp"]
+    if "corr_low" in df_corr.columns: right_cols.append("corr_low")
+    if "corr_high" in df_corr.columns: right_cols.append("corr_high")
+
+    right = df_corr.sort_values(["depth_m", "datetime"])[["datetime", "depth_m"] + right_cols]
+    left = df_pred.sort_values(["depth_m", "datetime"]).copy()
+
+    merged = safe_merge_asof_by_depth_keep_left(
+        left, right, tol, right_value_cols=right_cols, suffixes=("", "")
+    )
+    return merged
+
+# ---- 余白圧縮CSS ----
+def inject_compact_css():
+    """モバイル向けにヘッダー余白を圧縮するCSS。"""
+    compact_css = """
+    <style>
+      [data-testid="stHeader"], header, .stAppHeader { display:none !important; height:0 !important; }
+      footer, #MainMenu { display:none !important; height:0 !important; }
+      .block-container { padding-top: 4px !important; padding-bottom: 4px !important; }
+      .stMarkdown p { margin: 1px 0 !important; line-height: 1.12 !important; }
+
+      /* 横並び（st.columns）の折り返しを抑制 */
+      div[data-testid="stHorizontalBlock"] { gap: 6px !important; flex-wrap: nowrap !important; }
+      div[data-testid="column"], div[data-testid="stColumn"] { min-width: 0 !important; }
+
+      div[data-testid="stSelectbox"], div[data-testid="stRadio"], div[data-testid="stSegmentedControl"],
+      div[data-testid="stMultiSelect"], div[data-testid="stDateInput"], div[data-testid="stSlider"],
+      div[data-testid="stNumberInput"], div[data-testid="stCheckbox"] {
+        margin-top: 0 !important;
+        margin-bottom: 3px !important;
+      }
+      @media (max-width: 480px) {
+        .block-container { padding-top: 1px !important; padding-bottom: 1px !important; }
+        div[data-testid="stHorizontalBlock"] { gap: 4px !important; }
+      }
+    </style>
+    """
+    st_html(compact_css, height=0)
+def get_arrow_svg(direction_deg, speed_mps):
+    if pd.isna(speed_mps) or pd.isna(direction_deg):
+        return ""
+    css_angle = (direction_deg - 90) % 360
+    def _style(s):
+        if np.isnan(s): return 18, "#CCCCCC"
+        speed_kt = s * 1.94384
+        if speed_kt < 1.0: return 18, "#0000FF"
+        elif speed_kt < 2.0: return 22, "#FFC107"
+        else: return 26, "#FF0000"
+    size, color = _style(speed_mps)
+    head_length = size * HEAD_LENGTH_RATIO
+    head_half_h = size * HEAD_HALF_HEIGHT_RATIO
+    line_end = size - head_length
+    return f"""
+<svg width="{size}" height="{size}" style="display:block;margin:0 auto;transform:rotate({css_angle}deg);">
+  <line x1="4" y1="{size/2}" x2="{line_end}" y2="{size/2}"
+        stroke="{color}" stroke-width="{SHAFT_WIDTH_PX}" stroke-linecap="round"/>
+  <polygon points="{line_end},{size/2 - head_half_h} {size},{size/2} {line_end},{size/2 + head_half_h}"
+           fill="{color}"/>
+</svg>
+""".strip()
+def get_color(temp: float, t_min: float = 0.0, t_max: float = 25.0) -> str:
+    if pd.isna(temp): return "rgba(220,220,220,0.4)"
+    ratio = (float(temp) - t_min) / (t_max - t_min)
+    ratio = max(0, min(1, ratio))
+    if ratio < 0.5:
+        r = int(240 * ratio * 2); g = int(240 * ratio * 2); b = 240
+    else:
+        r = 240; g = int(240 * (1 - (ratio - 0.5) * 2)); b = int(240 * (1 - (ratio - 0.5) * 2))
+    return f"rgba({r},{g},{b},0.4)"
+def get_calendar_css(max_h_vh: int = 65) -> str:
+    return f"""
+    <style>
+    .calendar-scroll-container {{
+      overflow-x: auto; overflow-y: auto;
+      max-height: {max_h_vh}vh; max-width: 100%;
+      -webkit-overflow-scrolling: touch;
+      border: 1px solid #e5e5e5; border-radius: 8px;
+      isolation: isolate;
+    }}
+    .calendar-table {{
+      border-collapse: separate; border-spacing: 0;
+      width: max-content; min-width: 640px; font-size: 14px;
+    }}
+    .calendar-table th, .calendar-table td {{
+      padding: 6px 10px;
+      border-bottom: 1px solid #eee;
+      text-align: center;
+      white-space: nowrap;
+    }}
+    thead th {{
+      position: sticky; top: 0;
+      background: #fafafa; z-index: 2;
+    }}
+    .calendar-table tbody th.depth-cell,
+    .calendar-table tbody td.depth-cell {{
+      position: sticky; left: 0;
+      background: #f7f7f7; z-index: 3;
+      min-width: 56px; text-align: center; font-weight: 700 !important;
+    }}
+    thead th:first-child {{
+      position: sticky; left: 0; top: 0;
+      background: #f0f0f0; z-index: 4; min-width: 56px; text-align: center; font-weight: 700;
+    }}
+    .calendar-table .pred-small {{ font-size: 12px; color: #555; }}
+    </style>
+    """.strip()
+def correction_effective(
+    temp_pred: Optional[float],
+    temp_corr: Optional[float],
+    temp_obs: Optional[float] = None
+) -> bool:
+    if temp_pred is None or pd.isna(temp_pred): return False
+    if temp_corr is None or pd.isna(temp_corr): return False
+    if not (PHYS_MIN < float(temp_corr) < PHYS_MAX): return False
+    if not (TEMP_MIN < float(temp_corr) < TEMP_MAX): return False
+    if (temp_obs is not None) and (not pd.isna(temp_obs)):
+        return abs(float(temp_corr) - float(temp_obs)) < OUTLIER_TH_OBS
+    else:
+        return abs(float(temp_corr) - float(temp_pred)) < OUTLIER_TH
+def render_cell_html(
+    temp_pred: Optional[float],
+    speed_mps: Optional[float],
+    dir_deg: Optional[float],
+    temp_corr_raw: Optional[float],
+    corr_on: bool,
+    temp_obs: Optional[float] = None,
+) -> str:
+    corr_ok = corr_on and correction_effective(temp_pred, temp_corr_raw, temp_obs=temp_obs)
+    bg_value = float(temp_corr_raw) if corr_ok else (float(temp_pred) if temp_pred is not None else np.nan)
+    bg_color = get_color(bg_value) if not pd.isna(bg_value) else "rgba(220,220,220,0.6)"
+    pred_label = f"{float(temp_pred):.1f}°C" if (temp_pred is not None and not pd.isna(temp_pred)) else "NaN"
+    pred_html = f"<span class='pred-small'>{pred_label}</span>"
+
+    speed_html, arrow_html = "", ""
+    if (speed_mps is not None and not pd.isna(speed_mps)) and (dir_deg is not None and not pd.isna(dir_deg)):
+        speed_kt = float(speed_mps) * 1.94384
+        speed_html = f"<span style='font-size:12px;color:#444;'>{speed_kt:.1f} kt</span>"
+        arrow_html = f"<span style='display:block;line-height:1;margin:0;padding:0;'>{get_arrow_svg(float(dir_deg), float(speed_mps))}</span>"
+
+    corr_html = ""
+    if corr_on and (temp_corr_raw is not None) and not pd.isna(temp_corr_raw) and corr_ok:
+        corr_html = f"<span style='color:#D32F2F;font-weight:700;font-size:14px;'>{float(temp_corr_raw):.1f}°C</span>"
+
+    content = (
+        "<div style='display:flex;flex-direction:column;align-items:center;gap:2px;'>"
+        + pred_html + speed_html + arrow_html + corr_html + "</div>"
+    )
+    return f"<td style='background:{bg_color}'>{content}</td>"
+def build_weekly_table_html(df_period: pd.DataFrame, day_list: List[pd.Timestamp], depths: List[int], corr_on: bool) -> str:
+    times = [d.strftime('%m/%d') for d in day_list]
+    html = (
+        '<div class="calendar-scroll-container"><table class="calendar-table">'
+        "<thead><tr><th>水深</th>" + "".join([f"<th>{t}</th>" for t in times]) + "</tr></thead><tbody>"
+    )
+    for depth in depths:
+        html += f"<tr><td class='depth-cell'>{depth}m</td>"
+        for day in day_list:
+            g = df_period[(df_period["date_day"] == day.date()) & (df_period["depth_m"] == depth)]
+            if not g.empty:
+                target_dt = pd.Timestamp(day.date()) + pd.Timedelta(hours=12)
+                row = g.assign(_diff=(g["datetime"] - target_dt).abs()).sort_values("_diff").iloc[[0]]
+                temp_ark = row
+                temp_pred = float(temp_ark["pred_temp"].values[0]) if "pred_temp" in temp_ark.columns else np.nan
+                speed_val = float(temp_ark["Speed"].values[0]) if "Speed" in temp_ark.columns else np.nan
+                dir_val = float(temp_ark["Direction_deg"].values[0]) if "Direction_deg" in temp_ark.columns else np.nan
+                temp_corr = float(temp_ark["corr_temp"].values[0]) if "corr_temp" in temp_ark.columns else None
+                temp_obs = float(temp_ark["obs_temp"].values[0]) if ("obs_temp" in temp_ark.columns and not pd.isna(temp_ark["obs_temp"].values[0])) else None
+                html += render_cell_html(temp_pred, speed_val, dir_val, temp_corr, corr_on, temp_obs=temp_obs)
+            else:
+                html += "<td>-</td>"
+        html += "</tr>\n"
+    html += "</tbody></table></div>"
+    return html
+def build_daily_table_html(df_day: pd.DataFrame, depths: List[int], corr_on: bool) -> str:
+    hours_list = sorted(df_day["datetime"].dt.floor("h").unique())
+    times_hr = [t.strftime('%H:%M') for t in hours_list]
+    html = (
+        '<div class="calendar-scroll-container"><table class="calendar-table">'
+        "<thead><tr><th>水深</th>" + "".join([f"<th>{t}</th>" for t in times_hr]) + "</tr></thead><tbody>"
+    )
+    for depth in depths:
+        html += f"<tr><td class='depth-cell'>{depth}m</td>"
+        for t_obj in hours_list:
+            row = df_day[(df_day["datetime"].dt.floor("h") == t_obj) & (df_day["depth_m"] == depth)]
+            if not row.empty:
+                temp_pred = float(row["pred_temp"].values[0]) if "pred_temp" in row.columns else np.nan
+                speed_val = float(row["Speed"].values[0]) if "Speed" in row.columns else np.nan
+                dir_val = float(row["Direction_deg"].values[0]) if "Direction_deg" in row.columns else np.nan
+                temp_corr = float(row["corr_temp"].values[0]) if "corr_temp" in row.columns else None
+                temp_obs = float(row["obs_temp"].values[0]) if ("obs_temp" in row.columns and not pd.isna(row["obs_temp"].values[0])) else None
+                html += render_cell_html(temp_pred, speed_val, dir_val, temp_corr, corr_on, temp_obs=temp_obs)
+            else:
+                html += "<td>-</td>"
+        html += "</tr>\n"
+    html += "</tbody></table></div>"
+    return html
+def make_layer_groups(depths: List[int]) -> Dict[str, List[int]]:
+    if not depths:
+        return {"表層": [], "中層": [], "底層": []}
+    d_sorted = sorted(depths); n = len(d_sorted)
+    if n <= 3:
+        top = d_sorted[:1]
+        mid = d_sorted[1:2] if n >= 2 else []
+        bot = d_sorted[2:] if n >= 3 else (d_sorted[-1:] if n >= 1 else [])
+    elif n in (4, 5):
+        top = d_sorted[:2]; mid = d_sorted[2:3]; bot = d_sorted[3:]
+    else:
+        top = d_sorted[:2]; bot = d_sorted[-2:]
+        mid = [d for d in d_sorted if d not in top + bot]
+        if len(mid) >= 3:
+            c = len(mid) // 2
+            mid = mid[c-1:c+1]
+    return {"表層": top, "中層": mid, "底層": bot}
+def summarize_weekly_for_depth(layer_name: str, target_depth: int, df_period: pd.DataFrame) -> Optional[str]:
+    """
+    指定した 'target_depth' 1本だけで週間コメントを作る。
+    corr_temp があれば優先、無ければ pred_temp を使う。
+    """
+    if df_period.empty or "depth_m" not in df_period.columns:
+        return None
+    g = df_period[df_period["depth_m"] == int(target_depth)].sort_values("datetime")
+    if g.empty:
+        return None
+
+    series = _pick_series_corr_then_pred(g)
+    if series is None:
+        return None
+
+    dfz = g.assign(val=pd.to_numeric(series, errors="coerce"))
+    dfz = dfz[(dfz["val"] > PHYS_MIN) & (dfz["val"] < PHYS_MAX)].dropna(subset=["val"])
+    if dfz.empty:
+        return None
+    if "date_day" not in dfz.columns:
+        dfz["date_day"] = dfz["datetime"].dt.date
+
+    daily = (
+        dfz.groupby("date_day", as_index=False)["val"]
+        .median()
+        .sort_values("date_day")
+    )
+    temps = daily["val"]
+    if temps.empty:
+        return None
+
+    rng_th = float(RANGE_STABLE)
+    dlt_th = float(DELTA_THRESH)
+
+    t_min, t_max = float(temps.min()), float(temps.max())
+    if t_max >= HIGH_TEMP_TH:
+        tag = f":red[高水温]（{t_min:.1f}℃～{t_max:.1f}℃）"
+        return f"**{layer_name}**： {int(target_depth)}m{tag}"
+
+    weekly_range = t_max - t_min
+    if weekly_range < rng_th:
+        t_start = float(temps.iloc[0])
+        tag = f"安定（{t_start:.1f}℃）"
+        return f"**{layer_name}**： {int(target_depth)}m{tag}"
+
+    n = len(temps)
+    idx_first = [i for i in [0, 1, 2] if i < n]
+    idx_last = [i for i in [4, 5, 6] if i < n]
+    first = temps.iloc[idx_first] if idx_first else temps.iloc[:max(1, n // 2)]
+    last  = temps.iloc[idx_last]  if idx_last  else temps.iloc[max(1, n // 2):]
+    delta = float(last.mean() - first.mean())
+
+    first_mean = float(first.mean()); last_mean = float(last.mean())
+    def payload_arrow() -> str: return f"{first_mean:.1f}℃→{last_mean:.1f}℃"
+    def payload_range() -> str: return f"{t_min:.1f}–{t_max:.1f}℃"
+    def payload() -> str: return payload_arrow() if DISPLAY_MODE == "arrow" else payload_range()
+
+    if delta > +dlt_th:
+        tag = f"上昇（{payload()}）"
+    elif delta < -dlt_th:
+        tag = f"下降（{payload()}）"
+    else:
+        t_start = float(temps.iloc[0]); t_end = float(temps.iloc[-1])
+        end_diff = t_end - t_start
+        if abs(end_diff) >= dlt_th:
+            tag = f"{'上昇' if end_diff > 0 else '下降'}（{payload()}）"
+        else:
+            tag = f"安定（{payload()}）"
+    return f"**{layer_name}**： {int(target_depth)}m{tag}"
+def pick_shallow_mid_deep_min10_from_depths(depths: List[int]) -> List[int]:
+    """
+    利用可能な深さの配列から、浅・中・深の3層代表を返す（10m起算）。
+    - 浅: 10m以上の最小値。なければ最浅。
+    - 深: 最深。
+    - 中: 浅と深の中間の順位（偶数は下側）。
+    - 候補が2以下なら、その分だけ返す。
+    """
+    if not depths:
+        return []
+    xs = sorted(set(int(d) for d in depths))
+    n = len(xs)
+    if n <= 2:
+        return xs
+    low_idx = 0
+    for i, d in enumerate(xs):
+        if d >= 10:
+            low_idx = i
+            break
+    high_idx = n - 1
+    mid_idx = (low_idx + high_idx) // 2
+    chosen = [xs[low_idx], xs[mid_idx], xs[high_idx]]
+    return sorted(set(chosen))
+def summarize_weekly_layer_temp(layer_name: str, layer_depths: List[int], df_period: pd.DataFrame) -> Optional[str]:
+    if not layer_depths or df_period.empty or "depth_m" not in df_period.columns:
+        return None
+    valid_depths = set(pd.to_numeric(df_period["depth_m"], errors="coerce").dropna().astype(int))
+    depths_in_data = sorted(int(d) for d in layer_depths if int(d) in valid_depths)
+    if not depths_in_data:
+        return None
+    smd = pick_shallow_mid_deep_min10_from_depths(depths_in_data)
+    if not smd:
+        return None
+    if layer_name == "表層":
+        target_depth = smd[0]
+    elif layer_name == "中層":
+        target_depth = smd[min(1, len(smd)-1)]
+    else:
+        target_depth = smd[-1]
+    return summarize_weekly_for_depth(layer_name, target_depth, df_period)
+def dir_to_8pt_jp(deg: float) -> str:
+    if pd.isna(deg): return ""
+    dirs = ["北", "北東", "東", "南東", "南", "南西", "西", "北西"]
+    idx = int(((float(deg) + 22.5) % 360) // 45)
+    return dirs[idx]
+def speed_class_from_mps(v_mps: Optional[float]) -> str:
+    if v_mps is None or pd.isna(v_mps): return ""
+    kt = float(v_mps) * 1.94384
+    if kt >= 1.5: return "速"
+    if kt >= 0.5: return "中"
+    return "穏"
+def summarize_daily_layer_flow(
+    layer_name: str,
+    layer_depths: List[int],
+    df_day: pd.DataFrame,
+    use_short_labels: bool = True,
+    merge_same_segments: bool = False
+) -> Optional[str]:
+    if not layer_depths: return None
+    DAY_BINS = [("朝", 4, 6), ("昼", 11, 13), ("夕", 16, 18)]
+    order = {"朝": 0, "昼": 1, "夕": 2}
+    rows: List[Tuple[str, str, str]] = []
+    for label, h0, h1 in DAY_BINS:
+        g = df_day[(df_day["depth_m"].isin(layer_depths)) & (df_day["datetime"].dt.hour.between(h0, h1))]
+        if g.empty: continue
+        U_mean = g["U"].mean() if "U" in g.columns else np.nan
+        V_mean = g["V"].mean() if "V" in g.columns else np.nan
+        if pd.notna(U_mean) and pd.notna(V_mean):
+            speed_mean = float(np.sqrt(U_mean**2 + V_mean**2))
+            dir_deg_mean = (np.degrees(np.arctan2(U_mean, V_mean)) + 360.0) % 360.0
+        else:
+            D = g["Direction_deg"].dropna() if "Direction_deg" in g.columns else pd.Series(dtype=float)
+            if D.empty: continue
+            rad = np.deg2rad(D.values)
+            C = np.cos(rad).mean(); S = np.sin(rad).mean()
+            dir_deg_mean = (np.degrees(np.arctan2(S, C)) + 360.0) % 360.0
+            speed_mean = g["Speed"].mean() if "Speed" in g.columns else np.nan
+        d_txt = dir_to_8pt_jp(dir_deg_mean) if pd.notna(dir_deg_mean) else ""
+        v_cls = speed_class_from_mps(speed_mean) if pd.notna(speed_mean) else ""
+        if use_short_labels and v_cls:
+            v_map = {"穏やか": "穏", "中程度": "中", "速い": "速"}
+            v_cls = v_map.get(v_cls, v_cls)
+        if d_txt or v_cls:
+            rows.append((label, d_txt, v_cls))
+    if not rows: return None
+
+    segments: List[str] = []
+    if merge_same_segments:
+        bucket: Dict[Tuple[str, str], List[str]] = {}
+        for lbl, d, v in rows: bucket.setdefault((d, v), []).append(lbl)
+        for (d, v), lbls in bucket.items():
+            lbls_sorted = sorted(lbls, key=lambda x: order.get(x, 99))
+            inner = "・".join([x for x in [d, v] if x])
+            segments.append(f"{'・'.join(lbls_sorted)}（{inner}）")
+    else:
+        rows_sorted = sorted(rows, key=lambda r: order.get(r[0], 99))
+        for lbl, d, v in rows_sorted:
+            inner = "・".join([x for x in [d, v] if x])
+            segments.append(f"{lbl}（{inner}）")
+    return f"**{layer_name}**： " + "／".join(segments)
+
+
+
+
+def render_water_mode():
+    """水温（wt_test系のシンプル版）
+
+    - corr/<name>_corr.csv があれば corr を主表示、pred は薄く補助表示
+    - corr が無ければ pred を主表示
+    - obs があれば点で重ねる
+    - GSI は ON/OFF のみ（エリアは水温で選んだファイル名と一致するものを自動表示）
+    - サイドバーは使わない
+    """
+
+    # ---------- エリア（predファイル）選択 ----------
+    pred_folder = pjoin(BASE_DIR, PRED_DIR)
+    if not os.path.exists(pred_folder):
+        st.error(f"フォルダが見つかりません: {pred_folder}")
+        st.stop()
+
+    pred_files = [f for f in os.listdir(pred_folder) if f.lower().endswith(".csv")]
+    if not pred_files:
+        st.warning("pred に CSV がありません")
+        st.stop()
+
+    selected_file = st.selectbox("対象エリアを選択", sorted(pred_files), key="water_selected_file", label_visibility="collapsed")
+    # ---------- 読み込み（pred/corr/obs） ----------
+    pred_path = pjoin(BASE_DIR, PRED_DIR, selected_file)
+    name, ext = os.path.splitext(selected_file)
+    corr_path = pjoin(BASE_DIR, CORR_DIR, f"{name}_corr{ext}")
+    obs_path  = pjoin(BASE_DIR, OBS_DIR, selected_file)
+
+    fp_pred = file_fingerprint(pred_path)
+    fp_corr = file_fingerprint(corr_path)
+    fp_obs  = file_fingerprint(obs_path)
+
+    df_pred = load_pred(selected_file, fp_pred)
+    df_corr = load_corr_for(selected_file, fp_corr)
+    df_obs  = load_obs_for(selected_file, fp_obs)
+
+    if df_pred.empty:
+        st.warning("予測データが読み込めませんでした")
+        st.stop()
+
+    corr_available = (df_corr is not None) and (not df_corr.empty)
+    obs_available  = (df_obs  is not None) and (not df_obs.empty)
+
+    # ---------- 期間選択（直近1か月 / 任意期間） ----------
+    try:
+        period_mode = st.segmented_control(
+            "", options=["直近1か月", "任意期間"], default="直近1か月", key="water_period_mode"
+        )
+    except Exception:
+        period_mode = st.radio(
+            "", ["直近1か月", "任意期間"], index=0, horizontal=True,
+            key="water_period_mode_radio", label_visibility="collapsed"
         )
 
-    # レイヤ分け（表層/中層/底層）
-    def make_layer_groups(depths: List[int]) -> Dict[str, List[int]]:
-        if not depths:
-            return {"表層": [], "中層": [], "底層": []}
-        d = sorted(depths); n = len(d)
-        if n <= 3:
-            return {"表層": d[:1], "中層": d[1:2] if n>=2 else [], "底層": d[2:] if n>=3 else (d[-1:] if n>=1 else [])}
-        if n in (4,5):
-            return {"表層": d[:2], "中層": d[2:3], "底層": d[3:]}
-        top, bot = d[:2], d[-2:]
-        mid = [x for x in d if x not in top+bot]
-        if len(mid) >= 3:
-            c = len(mid)//2; mid = mid[c-1:c+1]
-        return {"表層": top, "中層": mid, "底層": bot}
+    latest_dt = pd.to_datetime(df_pred["datetime"], errors="coerce").max()
+    days = sorted(df_pred["date_day"].dropna().unique()) if "date_day" in df_pred.columns else []
+    min_day = min(days) if days else latest_dt.date()
+    max_day = max(days) if days else latest_dt.date()
 
-    # コメント（週間：水温／日：流向・流速）
-    HIGH_TEMP_TH = 22.0
-    DAY_BINS = [("朝", 4, 6), ("昼", 11, 13), ("夕", 16, 18)]
+    if period_mode == "直近1か月":
+        end_day = latest_dt.date()
+        start_day = (latest_dt - pd.Timedelta(days=29)).date()
+    else:
+        start_default = max(min_day, max_day - pd.Timedelta(days=29))
+        start_day, end_day = st.slider(
+            "", min_value=min_day, max_value=max_day,
+            value=(start_default, max_day),
+            key="water_period_slider", label_visibility="collapsed"
+        )
 
-    def dir_to_8pt_jp(deg: float) -> str:
-        if pd.isna(deg): return ""
-        dirs = ["北","北東","東","南東","南","南西","西","北西"]
-        idx = int(((float(deg)+22.5)%360)//45)
-        return dirs[idx]
+    # ---------- 水深選択 ----------
+    depths_all = sorted(pd.to_numeric(df_pred.get("depth_m"), errors="coerce").dropna().astype(int).unique().tolist())
+    default_depths = depths_all[:min(3, len(depths_all))]
 
-    def speed_class_from_mps(v_mps: Optional[float]) -> str:
-        if v_mps is None or pd.isna(v_mps): return ""
-        kt = float(v_mps) * 1.94384
-        if kt >= 1.5: return "速"
-        if kt >= 0.8: return "やや速"
-        return "穏"
-
-    def summarize_weekly_layer_temp(layer_name, layer_depths, df_period, df_all, selected_day,
-                                    use_correction=False, reg_depthwise=None, stable_eps=0.4, outlier_th=None):
-        PHYS_MIN, PHYS_MAX = -1.5, 35.0
-        if not layer_depths or df_period is None or df_period.empty: return None
-        msgs = []
-        for depth in layer_depths:
-            g = df_period[df_period["depth_m"] == depth].copy()
-            if g.empty or "pred_temp" not in g.columns: continue
-            g = g.sort_values("datetime")
-            temps_pred = pd.to_numeric(g["pred_temp"], errors="coerce")
-            if use_correction:
-                if not (reg_depthwise and int(depth) in reg_depthwise): continue
-                alpha, beta = reg_depthwise[int(depth)]
-                temps_corr_raw = alpha + beta * temps_pred
-                temps_corr_clipped = np.clip(temps_corr_raw, TEMP_MIN, TEMP_MAX)
-                mask = (
-                    pd.notna(temps_pred) & pd.notna(temps_corr_raw) &
-                    (temps_corr_raw > PHYS_MIN) & (temps_corr_raw < PHYS_MAX) &
-                    (temps_corr_clipped > TEMP_MIN) & (temps_corr_clipped < TEMP_MAX)
-                )
-                if outlier_th is not None:
-                    diff = (temps_corr_raw - temps_pred).abs(); mask &= (diff < float(outlier_th))
-                temps = pd.Series(temps_corr_raw)[mask]
-            else:
-                temps = temps_pred[(pd.notna(temps_pred)) & (temps_pred > PHYS_MIN) & (temps_pred < PHYS_MAX)]
-            temps = pd.to_numeric(temps, errors="coerce").replace([np.inf,-np.inf], np.nan).dropna()
-            if len(temps)==0: continue
-            t_min, t_max = float(temps.min()), float(temps.max())
-            if t_max >= HIGH_TEMP_TH:
-                tag = f"高水温注意（{t_min:.1f}℃～{t_max:.1f}℃）"
-            else:
-                if len(temps) >= 2:
-                    t_start, t_end = float(temps.iloc[0]), float(temps.iloc[-1])
-                    delta = t_end - t_start
-                    if delta > stable_eps: tag = f"上昇（{t_start:.1f}℃→{t_end:.1f}℃）"
-                    elif delta < -stable_eps: tag = f"下降（{t_start:.1f}℃→{t_end:.1f}℃）"
-                    else: tag = f"安定（{t_start:.1f}℃）"
-                else:
-                    t = float(temps.iloc[0]); tag = f"安定（{t:.1f}℃）"
-            msgs.append(f"{depth}m{tag}")
-        return (f"**{layer_name}**： " + "／".join(msgs)) if msgs else None
-
-    def summarize_daily_layer_flow(layer_name, layer_depths, df_day):
-        if not layer_depths: return None
-        order = {"朝": 0, "昼": 1, "夕": 2}
-        rows = []
-        for label, h0, h1 in DAY_BINS:
-            g = df_day[(df_day["depth_m"].isin(layer_depths)) & (df_day["datetime"].dt.hour.between(h0,h1))]
-            if g.empty: continue
-            U_mean = g["U"].mean() if "U" in g.columns else np.nan
-            V_mean = g["V"].mean() if "V" in g.columns else np.nan
-            if pd.notna(U_mean) and pd.notna(V_mean):
-                speed = float(np.sqrt(U_mean**2 + V_mean**2)); deg = (np.degrees(np.arctan2(U_mean, V_mean)) + 360.0) % 360.0
-            else:
-                D = g["Direction_deg"].dropna() if "Direction_deg" in g.columns else pd.Series(dtype=float)
-                if D.empty: continue
-                rad = np.deg2rad(D.values); C = np.cos(rad).mean(); S = np.sin(rad).mean()
-                deg = (np.degrees(np.arctan2(S, C)) + 360.0) % 360.0
-                speed = g["Speed"].mean() if "Speed" in g.columns else np.nan
-            d_txt = dir_to_8pt_jp(deg) if pd.notna(deg) else ""; v_cls = speed_class_from_mps(speed) if pd.notna(speed) else ""
-            if d_txt or v_cls: rows.append((label, d_txt, v_cls))
-        if not rows: return None
-        rows = sorted(rows, key=lambda r: order.get(r[0], 99))
-        seg = [f"{lbl}（{'・'.join([x for x in [d,v] if x])}）" for lbl,d,v in rows]
-        return f"**{layer_name}**： " + "／".join(seg)
-
-    def render_cell_html(temp, use_correction, corr_temp_raw, corr_temp_clip, bg_basis, is_invalid,
-                        arrow_svg="", speed_kt_label="") -> str:
-        if is_invalid:
-            bg_color = "rgba(220,220,220,0.6)"
-            return f"<td style='background:{bg_color}'><div style='text-align:center;'>-</div></td>"
-        if (bg_basis == "補正に連動") and (corr_temp_clip is not None):
-            bg_color = get_color(float(corr_temp_clip))
+    # corr+obs が揃う深度があれば優先
+    if corr_available:
+        d_corr = set(pd.to_numeric(df_corr.get("depth_m"), errors="coerce").dropna().astype(int).unique().tolist())
+        if obs_available:
+            d_obs = set(pd.to_numeric(df_obs.get("depth_m"), errors="coerce").dropna().astype(int).unique().tolist())
+            both = sorted(d_corr.intersection(d_obs))
+            if both:
+                default_depths = both[:min(3, len(both))]
         else:
-            bg_color = get_color(float(temp)) if (temp is not None and not pd.isna(temp)) else "rgba(220,220,220,0.6)"
-        pred_label = f"{float(temp):.1f}°C" if (temp is not None and not pd.isna(temp)) else "NaN"
-        pred_html = f"<span class='pred-small'>{pred_label}</span>"
-        corr_html = f"<span style='color:#D32F2F;font-weight:700;font-size:16px;margin:0;padding:0;'>{corr_temp_raw:.1f}°C</span>" \
-                    if use_correction and (corr_temp_raw is not None) else ""
-        main = corr_html if corr_html else pred_html
-        speed_html = f"<span style='font-size:12px;color:#444;'>{speed_kt_label}</span>" if speed_kt_label else ""
-        arrow_html = f"<span style='display:block;line-height:1;margin:0;padding:0;'>{arrow_svg}</span>" if arrow_svg else ""
-        content = ("<div style='display:flex;flex-direction:column;align-items:center;gap:2px;margin:0;padding:0;'>"
-                + main + speed_html + arrow_html + "</div>")
-        return f"<td style='background:{bg_color}'>{content}</td>"
+            dc = sorted(d_corr)
+            if dc:
+                default_depths = dc[:min(3, len(dc))]
 
-    styles = get_calendar_css(max_h_vh)
-    mode_view = st.radio("表示期間", ["週間予測（表示値は昼頃）", "選択日（1時間毎）"]) 
-    layers = make_layer_groups(depths_all)
+    sel_depths = st.multiselect(
+        "水深（複数可）", options=depths_all, default=default_depths, key="water_depths"
+    )
+
+    # ---------- 期間フィルタ ----------
+    dfp = df_pred[(df_pred["date_day"] >= start_day) & (df_pred["date_day"] <= end_day)].copy()
+    dfc = df_corr[(df_corr["date_day"] >= start_day) & (df_corr["date_day"] <= end_day)].copy() if corr_available else pd.DataFrame()
+    dfo = df_obs [(df_obs ["date_day"] >= start_day) & (df_obs ["date_day"] <= end_day)].copy() if obs_available else pd.DataFrame()
+
+    # ---------- 描画 ----------
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    base_colors = px.colors.qualitative.Dark24
+
+    # pred/corr/obs
+    for i, d in enumerate(sel_depths):
+        d_int = int(d)
+        col = base_colors[i % len(base_colors)]
+
+        gp = dfp[pd.to_numeric(dfp["depth_m"], errors="coerce").fillna(-9999).astype(int) == d_int]
+        gc = dfc[pd.to_numeric(dfc.get("depth_m"), errors="coerce").fillna(-9999).astype(int) == d_int] if not dfc.empty else pd.DataFrame()
+        go_ = dfo[pd.to_numeric(dfo.get("depth_m"), errors="coerce").fillna(-9999).astype(int) == d_int] if not dfo.empty else pd.DataFrame()
+
+        has_corr_line = (not gc.empty) and ("corr_temp" in gc.columns) and (pd.to_numeric(gc["corr_temp"], errors="coerce").notna().any())
+
+        # corr があれば主表示（太線）
+        if has_corr_line:
+            # 可能なら帯
+            if ("corr_low" in gc.columns) and ("corr_high" in gc.columns):
+                ylow = pd.to_numeric(gc["corr_low"], errors="coerce")
+                yhigh = pd.to_numeric(gc["corr_high"], errors="coerce")
+                fig.add_trace(
+                    go.Scatter(x=gc["datetime"], y=ylow, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"),
+                    secondary_y=False
+                )
+                fig.add_trace(
+                    go.Scatter(x=gc["datetime"], y=yhigh, mode="lines", line=dict(width=0), fill="tonexty",
+                               fillcolor=to_rgba(col, 0.12), showlegend=False, hoverinfo="skip"),
+                    secondary_y=False
+                )
+
+            ycorr = pd.to_numeric(gc["corr_temp"], errors="coerce")
+            fig.add_trace(
+                go.Scatter(x=gc["datetime"], y=ycorr, mode="lines", name=f"{d_int}m 補正",
+                           line=dict(color=col, width=3.0)),
+                secondary_y=False
+            )
+
+            # pred は薄く補助
+            if not gp.empty and ("pred_temp" in gp.columns):
+                ypred = pd.to_numeric(gp["pred_temp"], errors="coerce")
+                fig.add_trace(
+                    go.Scatter(x=gp["datetime"], y=ypred, mode="lines", name=f"{d_int}m 予測",
+                               line=dict(color=col, width=1.2, dash="dot"), opacity=0.35, showlegend=False),
+                    secondary_y=False
+                )
+
+        # corr が無い場合は pred を主表示
+        else:
+            if not gp.empty and ("pred_temp" in gp.columns):
+                ypred = pd.to_numeric(gp["pred_temp"], errors="coerce")
+                fig.add_trace(
+                    go.Scatter(x=gp["datetime"], y=ypred, mode="lines", name=f"{d_int}m 予測",
+                               line=dict(color=col, width=2.0)),
+                    secondary_y=False
+                )
+
+        # obs 点
+        if not go_.empty and ("obs_temp" in go_.columns):
+            yobs = pd.to_numeric(go_["obs_temp"], errors="coerce")
+            fig.add_trace(
+                go.Scatter(x=go_["datetime"], y=yobs, mode="markers", name=f"{d_int}m 実測",
+                           marker=dict(size=6, color=col, line=dict(color="black", width=0.2)), opacity=0.75, showlegend=False),
+                secondary_y=False
+            )
+
+
+    fig.update_layout( height=550,
+        margin=dict(l=10, r=10, t=90, b=10),
+        template="plotly_white",
+        legend=dict(orientation="h", yanchor="top", y=1.02, xanchor="right", x=1)
+    )
+    fig.update_yaxes(title_text="水温(℃)", secondary_y=False)
+    fig.update_yaxes(title_text="GSI", secondary_y=True)
+    st.plotly_chart(fig, use_container_width=True)
+def render_calendar_mode():
+    """wt_test と同等の予測カレンダー（corr/<name>_corr.csv 優先）。"""
+    # pred ファイル選択
+    pred_folder = pjoin(BASE_DIR, PRED_DIR)
+    if not os.path.exists(pred_folder):
+        st.error(f"フォルダが見つかりません: {pred_folder}")
+        st.stop()
+    pred_files = [f for f in os.listdir(pred_folder) if f.lower().endswith('.csv')]
+    if not pred_files:
+        st.warning("pred に CSV がありません")
+        st.stop()
+
+    selected_file = st.selectbox("対象エリアを選択", sorted(pred_files), key='cal_selected_file', label_visibility="collapsed")
+
+    # 指紋（キャッシュキー）
+    pred_path = pjoin(BASE_DIR, PRED_DIR, selected_file)
+    name, ext = os.path.splitext(selected_file)
+    corr_path = pjoin(BASE_DIR, CORR_DIR, f"{name}_corr{ext}")
+    obs_path  = pjoin(BASE_DIR, OBS_DIR, selected_file)
+    fp_pred = file_fingerprint(pred_path)
+    fp_corr = file_fingerprint(corr_path)
+    fp_obs  = file_fingerprint(obs_path)
+
+    # 読み込み
+    df_pred = load_pred(selected_file, fp_pred)
+    df_corr = load_corr_for(selected_file, fp_corr)
+    df_obs  = load_obs_for(selected_file, fp_obs)
+    corr_available = not df_corr.empty
+
+    if df_pred.empty:
+        st.warning("予測データが読み込めませんでした")
+        st.stop()
+
+    # UI（wt_test 準拠）
+    today_jst = pd.Timestamp.now(tz="Asia/Tokyo").date()
+    latest_day = df_pred["date_day"].max()
+    available_days = sorted(df_pred["date_day"].unique())
+    min_day = min(available_days) if available_days else latest_day
+    max_day = max(available_days) if available_days else latest_day
+
+    try:
+        cal_choice = st.segmented_control(
+            "", options=["週間表示（昼頃）", "選択日（1時間毎）"],
+            default="週間表示（昼頃）", key='cal_choice'
+        )
+    except Exception:
+        cal_choice = st.radio(
+            "", ["週間表示（昼頃）", "選択日（1時間毎）"],
+            index=0, horizontal=True, key='cal_choice_radio',
+            label_visibility='collapsed'
+        )
 
     # ===== 週間（昼頃） =====
-    if mode_view == "週間予測（表示値は昼頃）":
-        base_day = st.date_input("週間予測の基準日", value=end_day,
-            min_value=min(df_dr["date_day"]) if not df_dr.empty else end_day,
-            max_value=max(df_dr["date_day"]) if not df_dr.empty else end_day)
-        start_day_hdr = pd.to_datetime(base_day) - pd.Timedelta(days=(recent_days - 1))
-        end_day_hdr = pd.to_datetime(base_day)
-        day_list = list(pd.date_range(start_day_hdr, end_day_hdr, freq="D"))
-        df_period = df_dr[df_dr["date_day"].isin([d.date() for d in day_list])].copy()
-        if 'df_obs' in locals():
-            df_obs_period = df_obs[df_obs["date_day"].isin([d.date() for d in day_list])].copy()
+    if cal_choice == "週間表示（昼頃）":
+        base_day_week = min(max(today_jst, min_day), max_day)
+        selected_day = st.date_input(
+            "", value=base_day_week,
+            min_value=min_day, max_value=max_day,
+            key='cal_week_base_day', label_visibility='collapsed'
+        )
 
-        st.markdown(f"**{pd.to_datetime(start_day_hdr):%m/%d}～{pd.to_datetime(end_day_hdr):%m/%d}**")
+        if WEEK_WINDOW_FORWARD:
+            start_day = pd.Timestamp(selected_day)
+            end_day = start_day + pd.Timedelta(days=7)
+        else:
+            end_day = pd.Timestamp(selected_day)
+            start_day = end_day - pd.Timedelta(days=7)
 
-        any_line = False
-        for lname, ldepths in layers.items():
-            line = summarize_weekly_layer_temp(lname, ldepths, df_period, df_dr, end_day_hdr,
-                use_correction=use_correction, reg_depthwise=reg_depthwise, stable_eps=0.4, outlier_th=7.0)
-            if line:
-                any_line = True
-            import re as _re
-            def _highlight_high_temp(_s):
-                return _re.sub(r'高水温注意（[^）]+）', lambda m: f"<span style='color:#D32F2F;font-weight:700;'>{m.group(0)}</span>", _s)
-            st.markdown(_highlight_high_temp(line), unsafe_allow_html=True)
-        if not any_line: st.caption("（特筆すべき変化はありません）")
+        day_list = list(pd.date_range(start_day, end_day, freq='D'))
+        df_period = df_pred[df_pred["date_day"].isin([d.date() for d in day_list])].copy()
 
-        depths_for_table = list(depths_all)
-        if use_correction and (reg_depthwise is not None):
-            depths_for_table = [d for d in depths_for_table if int(d) in reg_depthwise]
-        if not depths_for_table:
-            st.caption("（補正係数が算出できた水深がありませんでした）")
+        # corr 付与
+        if corr_available:
+            df_corr_period = df_corr[df_corr["date_day"].isin([d.date() for d in day_list])].copy()
+            df_period = add_corr(df_period, df_corr_period)
 
-        times = [d.strftime('%m/%d') for d in day_list]
-        html = "<div class='calendar-scroll-container'><table class='calendar-table'>" \
-            + "<thead><tr><th>水深</th>" + "".join([f"<th>{t}</th>" for t in times]) + "</tr></thead><tbody>"
-        PHYS_MIN, PHYS_MAX = -1.5, 35.0
-        for depth in depths_for_table:
-            html += f"<tr><td class='depth-cell'>{depth}m</td>"
-            for day in day_list:
-                g = df_period[(df_period["date_day"] == day.date()) & (df_period["depth_m"] == depth)]
-                if not g.empty:
-                    target_dt = pd.Timestamp(day.date()) + pd.Timedelta(hours=12)
-                    g2 = g.assign(_diff=(g["datetime"] - target_dt).abs()).sort_values("_diff")
-                    row = g2.iloc[[0]].drop(columns=["_diff"])
-                    temp = float(row["pred_temp"].values[0]) if "pred_temp" in row.columns else float(row.get("pred_temp", [np.nan])[0])
-                    corr_raw = corr_clip = None
-                    if use_correction and (reg_depthwise is not None) and (int(depth) in reg_depthwise) and not pd.isna(temp):
-                        alpha, beta = reg_depthwise[int(depth)]; corr_raw = float(alpha + beta * float(temp))
-                        corr_clip = float(np.clip(corr_raw, TEMP_MIN, TEMP_MAX))
-                    is_invalid = False
-                    if use_correction and (corr_raw is not None) and ((corr_raw <= PHYS_MIN) or (corr_raw >= PHYS_MAX)): is_invalid = True
-                    if (not is_invalid) and (corr_clip is not None) and ((corr_clip <= TEMP_MIN) or (corr_clip >= TEMP_MAX)): is_invalid = True
-                    if (not is_invalid) and (corr_raw is not None) and (abs(float(corr_raw)-float(temp)) >= 7.0): is_invalid = True
-                    speed_mps = dir_deg = None
-                    try:
-                        tol = pd.Timedelta(minutes=int(tolerance_min))
-                        obs_d = df_obs_period[df_obs_period["depth_m"] == depth]
-                        if not obs_d.empty:
-                            obs_d = obs_d.assign(_diff=(obs_d["datetime"] - target_dt).abs()).sort_values("_diff")
-                            obs_near = obs_d.iloc[0]
-                            if (obs_near["datetime"] >= target_dt - tol) and (obs_near["datetime"] <= target_dt + tol):
-                                if {"U","V"}.issubset(set(df_obs_period.columns)):
-                                    u = float(obs_near.get("U")) if pd.notna(obs_near.get("U")) else None
-                                    v = float(obs_near.get("V")) if pd.notna(obs_near.get("V")) else None
-                                    if (u is not None) and (v is not None):
-                                        speed_mps = (u**2 + v**2) ** 0.5
-                                        dir_deg = (np.degrees(np.arctan2(u, v)) + 360.0) % 360.0
-                                if (speed_mps is None or dir_deg is None) and {"Direction_deg","Speed"}.issubset(set(df_obs_period.columns)):
-                                    dd = float(obs_near.get("Direction_deg")) if pd.notna(obs_near.get("Direction_deg")) else None
-                                    ss = float(obs_near.get("Speed")) if pd.notna(obs_near.get("Speed")) else None
-                                    dir_deg = dd if dd is not None else dir_deg
-                                    speed_mps = ss if ss is not None else speed_mps
-                    except Exception:
-                        pass
-                    if (speed_mps is None or dir_deg is None):
-                        try:
-                            if {"U","V"}.issubset(set(row.columns)):
-                                u = float(row["U"].values[0]) if not pd.isna(row["U"].values[0]) else None
-                                v = float(row["V"].values[0]) if not pd.isna(row["V"].values[0]) else None
-                                if (u is not None) and (v is not None):
-                                    speed_mps = (u**2 + v**2) ** 0.5
-                                    dir_deg = (np.degrees(np.arctan2(u, v)) + 360.0) % 360.0
-                            elif {"Direction_deg","Speed"}.issubset(set(row.columns)):
-                                dd = float(row["Direction_deg"].values[0]) if not pd.isna(row["Direction_deg"].values[0]) else None
-                                ss = float(row["Speed"].values[0]) if not pd.isna(row["Speed"].values[0]) else None
-                                dir_deg = dd if dd is not None else dir_deg
-                                speed_mps = ss if ss is not None else speed_mps
-                        except Exception:
-                            pass
-                    speed_kt_label = f"{(speed_mps*1.94384):.1f} kt" if (speed_mps is not None) else ""
-                    arrow_svg = get_arrow_svg(dir_deg, speed_mps) if (speed_mps is not None and dir_deg is not None) else ""
-                    html += render_cell_html(temp, use_correction, corr_raw, corr_clip, bg_basis, is_invalid,
-                                            arrow_svg=arrow_svg, speed_kt_label=speed_kt_label)
-                else:
-                    html += "<td>-</td>"
-            html += "</tr>\n"
-        html += "</tbody></table></div>"
-        full_html = f"<!doctype html><html><head><meta charset='utf-8'>{styles}</head><body>{html}</body></html>"
-        iframe_height = int(max(400, min(1100, max_h_vh * 10)))
-        st_html(full_html, height=iframe_height, scrolling=True)
+        # obs 温度（週コメント判定用）
+        if (not df_obs.empty) and (not df_period.empty):
+            df_obs_week = df_obs[df_obs["date_day"].between(day_list[0].date(), day_list[-1].date())].copy()
+            tol_obs = pd.Timedelta(minutes=OBS_MATCH_TOL_MIN)
+            left = df_period.sort_values(["depth_m","datetime"]).copy()
+            right = df_obs_week.sort_values(["depth_m","datetime"])[["datetime","depth_m","obs_temp"]].copy()
+            df_period = safe_merge_asof_by_depth_keep_left(
+                left, right, tolerance=tol_obs,
+                right_value_cols=["obs_temp"], suffixes=("", "")
+            )
 
+        depths_all = sorted([int(d) for d in df_pred["depth_m"].dropna().unique()])
+        # 週コメント（表層/中層/底層）
+
+        with st.expander(f'コメント（{start_day:%m/%d}～{end_day:%m/%d}の推移）', expanded=False):
+                    layers = make_layer_groups(depths_all)
+                    any_line = False
+                    for lname, ldepths in layers.items():
+                        line = summarize_weekly_layer_temp(lname, ldepths, df_period)
+                        if line:
+                            any_line = True
+                            st.markdown(line)
+                    if not any_line:
+                        st.caption("（特筆すべき変化はありません）")
+
+        table_html = build_weekly_table_html(df_period, day_list, depths_all, corr_on=corr_available)
+        styles = get_calendar_css(65)
+        full_html = f"<!doctype html><html><head><meta charset='utf-8'>{styles}</head><body>{table_html}</body></html>"
+        st_html(full_html, height=650, scrolling=True)
+
+    # ===== 選択日（1時間毎） =====
     else:
-        available_days = sorted(df_dr["date_day"].unique())
-        min_day = min(available_days) if available_days else latest_day
-        max_day = max(available_days) if available_days else latest_day
-        selected_day = st.date_input("表示日（1時間毎）", value=max_day, min_value=min_day, max_value=max_day)
-        df_day = df_dr[df_dr["date_day"] == selected_day].copy()
-        hours_list = sorted(df_day["datetime"].dt.floor("h").unique())
-        times_hr = [t.strftime('%H:%M') for t in hours_list]
-        st.markdown("**朝(4～6時)、昼(11～13時)、夕(16～18時)**")
-        any_line = False
-        for lname, ldepths in layers.items():
-            flow_line = summarize_daily_layer_flow(lname, ldepths, df_day)
-            if flow_line:
-                any_line = True
-                st.markdown(flow_line, unsafe_allow_html=True)
-        if not any_line: st.caption("（特筆すべき変化はありません）")
+        base_day_day = min(max(today_jst, min_day), max_day)
+        selected_day = st.date_input(
+            "", value=base_day_day,
+            min_value=min_day, max_value=max_day,
+            key='cal_day_sel', label_visibility='collapsed'
+        )
 
-        if use_correction:
-            sel_train_end_dt = pd.Timestamp(selected_day) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-            sel_train_start_dt = pd.Timestamp(selected_day) - pd.Timedelta(days=train_days)
-            with st.spinner(
-                f"回帰補正パラメータ算出中（{selected_file}、終端={selected_day:%Y-%m-%d}、遡り{train_days}日）..."
-            ):
-                reg_depthwise_sel, n_match_reg_sel = compute_depthwise_regression(
-                    base_dir, selected_file, tolerance_min,
-                    start_dt=sel_train_start_dt, end_dt=sel_train_end_dt, min_pairs=5
-                )
-            if reg_depthwise_sel is None:
-                st.warning("選択日終端での回帰係数算出に失敗（一致データ不足など）。補正なしで表示します。")
-                use_correction = False
-            else:
-                reg_depthwise = reg_depthwise_sel
-                total_pairs = sum((n_match_reg_sel or {}).values())
-                st.caption(f"補正に使用したデータ数（選択日終端の一致ペア合計）: {total_pairs} 件")
+        df_day = df_pred[df_pred["date_day"] == selected_day].copy()
+        if corr_available:
+            df_corr_sel = df_corr[df_corr["date_day"] == selected_day].copy()
+            df_day = add_corr(df_day, df_corr_sel)
 
-        depths_for_table = list(depths_all)
-        if use_correction and (reg_depthwise is not None):
-            depths_for_table = [d for d in depths_for_table if int(d) in reg_depthwise]
-        if not depths_for_table:
-            st.caption("（補正係数が算出できた水深がありませんでした）")
+        if (not df_obs.empty) and (not df_day.empty):
+            df_obs_sel = df_obs[df_obs["date_day"] == selected_day].copy()
+            tol_obs = pd.Timedelta(minutes=OBS_MATCH_TOL_MIN)
+            left = df_day.sort_values(["depth_m","datetime"]).copy()
+            right = df_obs_sel.sort_values(["depth_m","datetime"])[["datetime","depth_m","obs_temp"]].copy()
+            df_day = safe_merge_asof_by_depth_keep_left(
+                left, right, tolerance=tol_obs,
+                right_value_cols=["obs_temp"], suffixes=("", "")
+            )
 
-        html = "<div class='calendar-scroll-container'><table class='calendar-table'>" \
-            + "<thead><tr><th>水深</th>" + "".join([f"<th>{t}</th>" for t in times_hr]) + "</tr></thead><tbody>"
-        PHYS_MIN, PHYS_MAX = -1.5, 35.0
-        for depth in depths_for_table:
-            html += f"<tr><td class='depth-cell'>{depth}m</td>"
-            for t_obj in hours_list:
-                row = df_day[(df_day["datetime"].dt.floor("h") == t_obj) & (df_day["depth_m"] == depth)]
-                if not row.empty:
-                    temp = float(row["pred_temp"].values[0]) if "pred_temp" in row.columns else float(row.get("pred_temp", [np.nan])[0])
-                    corr_raw = corr_clip = None
-                    if use_correction and (reg_depthwise is not None) and (int(depth) in reg_depthwise) and not pd.isna(temp):
-                        alpha, beta = reg_depthwise[int(depth)]; corr_raw = float(alpha + beta * float(temp))
-                        corr_clip = float(np.clip(corr_raw, TEMP_MIN, TEMP_MAX))
-                    is_invalid = False
-                    if use_correction and (corr_raw is not None) and ((corr_raw <= PHYS_MIN) or (corr_raw >= PHYS_MAX)): is_invalid = True
-                    if (not is_invalid) and (corr_clip is not None) and ((corr_clip <= TEMP_MIN) or (corr_clip >= TEMP_MAX)): is_invalid = True
-                    if (not is_invalid) and (corr_raw is not None) and (abs(float(corr_raw)-float(temp)) >= 7.0): is_invalid = True
-                    speed_mps = dir_deg = None
-                    try:
-                        tol = pd.Timedelta(minutes=int(tolerance_min))
-                        obs_d = df_obs_period[df_obs_period["depth_m"] == depth]
-                        if not obs_d.empty:
-                            obs_d = obs_d.assign(_diff=(obs_d["datetime"] - t_obj).abs()).sort_values("_diff")
-                            obs_near = obs_d.iloc[0]
-                            if (obs_near["datetime"] >= t_obj - tol) and (obs_near["datetime"] <= t_obj + tol):
-                                if {"U","V"}.issubset(set(df_obs_period.columns)):
-                                    u = float(obs_near.get("U")) if pd.notna(obs_near.get("U")) else None
-                                    v = float(obs_near.get("V")) if pd.notna(obs_near.get("V")) else None
-                                    if (u is not None) and (v is not None):
-                                        speed_mps = (u**2 + v**2) ** 0.5
-                                        dir_deg = (np.degrees(np.arctan2(u, v)) + 360.0) % 360.0
-                                if (speed_mps is None or dir_deg is None) and {"Direction_deg","Speed"}.issubset(set(df_obs_period.columns)):
-                                    dd = float(obs_near.get("Direction_deg")) if pd.notna(obs_near.get("Direction_deg")) else None
-                                    ss = float(obs_near.get("Speed")) if pd.notna(obs_near.get("Speed")) else None
-                                    dir_deg = dd if dd is not None else dir_deg
-                                    speed_mps = ss if ss is not None else speed_mps
-                    except Exception:
-                        pass
-                    if (speed_mps is None or dir_deg is None):
-                        try:
-                            if {"U","V"}.issubset(set(row.columns)):
-                                u = float(row["U"].values[0]) if not pd.isna(row["U"].values[0]) else None
-                                v = float(row["V"].values[0]) if not pd.isna(row["V"].values[0]) else None
-                                if (u is not None) and (v is not None):
-                                    speed_mps = (u**2 + v**2) ** 0.5
-                                    dir_deg = (np.degrees(np.arctan2(u, v)) + 360.0) % 360.0
-                            elif {"Direction_deg","Speed"}.issubset(set(row.columns)):
-                                dd = float(row["Direction_deg"].values[0]) if not pd.isna(row["Direction_deg"].values[0]) else None
-                                ss = float(row["Speed"].values[0]) if not pd.isna(row["Speed"].values[0]) else None
-                                dir_deg = dd if dd is not None else dir_deg
-                                speed_mps = ss if ss is not None else speed_mps
-                        except Exception:
-                            pass
-                    speed_kt_label = f"{(speed_mps*1.94384):.1f} kt" if (speed_mps is not None) else ""
-                    arrow_svg = get_arrow_svg(dir_deg, speed_mps) if (speed_mps is not None and dir_deg is not None) else ""
-                    html += render_cell_html(temp, use_correction, corr_raw, corr_clip, bg_basis, is_invalid,
-                                            arrow_svg=arrow_svg, speed_kt_label=speed_kt_label)
+        depths_all = sorted([int(d) for d in df_pred["depth_m"].dropna().unique()])
+        with st.expander('コメント（朝(4～6時)、昼(11～13時)、夕(16～18時)）', expanded=False):
+                    any_line = False
+                    layers = make_layer_groups(depths_all)
+                    for lname, ldepths in layers.items():
+                        line = summarize_daily_layer_flow(lname, ldepths, df_day)
+                        if line:
+                            any_line = True
+                            st.markdown(line)
+                    if not any_line:
+                        st.caption("（特筆すべき変化はありません）")
+
+        table_html = build_daily_table_html(df_day, depths_all, corr_on=corr_available)
+        styles = get_calendar_css(65)
+        full_html = f"<!doctype html><html><head><meta charset='utf-8'>{styles}</head><body>{table_html}</body></html>"
+        st_html(full_html, height=650, scrolling=True)
+def metrics_gsi(df_gsi, area: str, year: int, week: int, eps: float = 0.2):
+    import pandas as pd
+    import math
+    g_week = df_gsi[(df_gsi['Area'].astype(str).str.strip() == str(area).strip()) & (df_gsi['Year'] == year) & (df_gsi['week'] == week)].copy()
+    if g_week.empty:
+        return float('nan'), 'データ不足', float('nan'), 'データ不足'
+    latest_date = pd.to_datetime(g_week['Date'], errors='coerce').max()
+    g_area_year = df_gsi[(df_gsi['Area'].astype(str).str.strip() == str(area).strip()) & (df_gsi['Year'] == year)].copy()
+    g_area_year['Date'] = pd.to_datetime(g_area_year['Date'], errors='coerce')
+    g_area_year = g_area_year.dropna(subset=['Date'])
+    cur = g_area_year[g_area_year['Date'] == latest_date]
+    prev_candidates = g_area_year[g_area_year['Date'] < latest_date]
+    prev_date = prev_candidates['Date'].max() if not prev_candidates.empty else None
+    prev = g_area_year[g_area_year['Date'] == prev_date] if prev_date is not None else pd.DataFrame()
+    cur_F = float(pd.to_numeric(cur.loc[cur.get('Sex','').astype(str).str.upper().str.strip()=='F','GSI'], errors='coerce').mean()) if not cur.empty else float('nan')
+    cur_M = float(pd.to_numeric(cur.loc[cur.get('Sex','').astype(str).str.upper().str.strip()=='M','GSI'], errors='coerce').mean()) if not cur.empty else float('nan')
+    prev_F = float(pd.to_numeric(prev.loc[prev.get('Sex','').astype(str).str.upper().str.strip()=='F','GSI'], errors='coerce').mean()) if not prev.empty else float('nan')
+    prev_M = float(pd.to_numeric(prev.loc[prev.get('Sex','').astype(str).str.upper().str.strip()=='M','GSI'], errors='coerce').mean()) if not prev.empty else float('nan')
+    def trend(cur_v, base_v):
+        if math.isnan(cur_v) or math.isnan(base_v): return 'データ不足'
+        d = cur_v - base_v
+        if d > eps:  return '上昇'
+        if d < -eps: return '下降'
+        return '変化なし'
+    return cur_F, trend(cur_F, prev_F), cur_M, trend(cur_M, prev_M)
+
+
+def metrics_larvae(df_larv, area: str, year: int, week: int):
+    import pandas as pd
+    import numpy as np
+    sub_week = df_larv[(df_larv['Area'].astype(str).str.strip() == str(area).strip()) & (df_larv['Year'] == year) & (df_larv['week'] == week)].copy()
+    if sub_week.empty:
+        return 0.0, 0.0, 0.0, float('nan'), float('nan')
+    sub_week['Date'] = pd.to_datetime(sub_week['Date'], errors='coerce')
+    latest_date = sub_week['Date'].max()
+    cur = sub_week[sub_week['Date'] == latest_date].copy()
+    size_cols = [c for c in cur.columns if str(c).isdigit()]
+    for c in size_cols: cur[c] = pd.to_numeric(cur[c], errors='coerce').fillna(0.0)
+    qty_200_259 = float(cur[[c for c in size_cols if 200 <= int(c) <= 259]].sum().sum()) if size_cols else 0.0
+    qty_ge260   = float(cur[[c for c in size_cols if int(c) >= 260]].sum().sum()) if size_cols else 0.0
+    qty_ge200   = qty_200_259 + qty_ge260
+    area_year = df_larv[(df_larv['Area'].astype(str).str.strip() == str(area).strip()) & (df_larv['Year'] == year)].copy()
+    area_year['Date'] = pd.to_datetime(area_year['Date'], errors='coerce')
+    prev_candidates = area_year[area_year['Date'] < latest_date]
+    prev_date = prev_candidates['Date'].max() if not prev_candidates.empty else None
+    diff_prev = float('nan')
+    if prev_date is not None:
+        prev = area_year[area_year['Date'] == prev_date].copy()
+        size_cols_prev = [c for c in prev.columns if str(c).isdigit()]
+        for c in size_cols_prev: prev[c] = pd.to_numeric(prev[c], errors='coerce').fillna(0.0)
+        prev_ge200 = float(prev[[c for c in size_cols_prev if int(c)>=200]].sum().sum()) if size_cols_prev else 0.0
+        diff_prev = qty_ge200 - prev_ge200
+    py = df_larv[(df_larv['Area'].astype(str).str.strip() == str(area).strip()) & (df_larv['Year'] == year-1) & (df_larv['week'] == week)].copy()
+    if not py.empty:
+        for c in [c for c in py.columns if str(c).isdigit()]: py[c] = pd.to_numeric(py[c], errors='coerce').fillna(0.0)
+        py_ge200 = float(py[[c for c in py.columns if c.isdigit() and int(c)>=200]].sum().sum())
+        diff_prevY = qty_ge200 - py_ge200
+    else:
+        diff_prevY = float('nan')
+    return qty_ge200, qty_200_259, qty_ge260, diff_prev, diff_prevY
+
+
+def metrics_temp10m(base_dir: str, area: str, year: int, week: int, eps_t: float=0.5):
+    import pandas as pd
+    import math
+    try:
+        df_dr = load_dr_single_file(base_dir, f"{area}.csv")
+    except Exception:
+        return float('nan'), 'データ不足', 'データ不足'
+    if df_dr.empty:
+        return float('nan'), 'データ不足', 'データ不足'
+    dt = pd.to_datetime(df_dr['datetime'], errors='coerce')
+    df_dr['week'] = dt.dt.isocalendar().week.astype(int)
+    df_dr['year'] = dt.dt.year
+    df_10 = df_dr[(df_dr['depth_m']==10) & (df_dr['year']==year) & (df_dr['week']==week)].copy()
+    cur = float(pd.to_numeric(df_10.get('pred_temp'), errors='coerce').mean()) if not df_10.empty else float('nan')
+    prev_week = max(int(week)-1, 1)
+    p10 = df_dr[(df_dr['depth_m']==10) & (df_dr['year']==year) & (df_dr['week']==prev_week)].copy()
+    prev = float(pd.to_numeric(p10.get('pred_temp'), errors='coerce').mean()) if not p10.empty else float('nan')
+    y10 = df_dr[(df_dr['depth_m']==10) & (df_dr['year']==(year-1)) & (df_dr['week']==week)].copy()
+    prevY = float(pd.to_numeric(y10.get('pred_temp'), errors='coerce').mean()) if not y10.empty else float('nan')
+    def trend(cur_v, base_v):
+        if math.isnan(cur_v) or math.isnan(base_v): return 'データ不足'
+        d = cur_v - base_v
+        if d > eps_t:  return '上昇'
+        if d < -eps_t: return '下降'
+        return '変化なし'
+    return cur, trend(cur, prev), trend(cur, prevY)
+
+def render_map_mode():
+    import pandas as pd
+    import numpy as np
+    import streamlit as st
+    import re
+    import folium
+    from streamlit_folium import folium_static
+    from datetime import datetime, timedelta
+
+    AREA_FILE   = pjoin(base_dir, "file_summary.csv")
+    GSI_FILE    = MATURITY_PATH 
+    LARVAE_FILE = LARVAE_PATH 
+
+    # 読み込み（既存ヘルパがあれば使用）
+    def _read(path):
+        for enc in ("utf-8", "utf-8-sig", "cp932"):
+            try:
+                df = pd.read_csv(path, encoding=enc)
+                df.columns = [c.strip() for c in df.columns]
+                return df
+            except Exception:
+                continue
+        return None
+    try:
+        df_area = read_csv_path(AREA_FILE)
+        df_gsi  = read_csv_path(GSI_FILE)
+        df_larv = read_csv_path(LARVAE_FILE)
+    except NameError:
+        df_area = _read(AREA_FILE)
+        df_gsi  = _read(GSI_FILE)
+        df_larv = _read(LARVAE_FILE)
+    if df_area is None or df_gsi is None or df_larv is None:
+        st.warning('file_summary.csv / maturity.csv / larvae.csv を配置してください。')
+        return
+
+    # 前処理
+    df_area['Area'] = df_area.get('Area', '').astype(str).str.strip()
+    for col in ['Laf','Lof']:
+        if col in df_area.columns:
+            df_area[col] = pd.to_numeric(df_area[col], errors='coerce')
+
+    df_gsi['Date'] = pd.to_datetime(df_gsi['Date'], errors='coerce')
+    df_gsi['Area'] = df_gsi.get('Area','').astype(str).str.strip()
+    df_gsi['GSI']  = pd.to_numeric(df_gsi['GSI'], errors='coerce')
+    df_gsi['Sex']  = df_gsi.get('Sex','Unknown').astype(str).str.strip().str.upper()
+    df_gsi['Year'] = df_gsi['Date'].dt.year
+    df_gsi['week'] = df_gsi['Date'].dt.isocalendar().week.astype(int)
+
+    df_larv['Date'] = pd.to_datetime(df_larv['Date'], errors='coerce')
+    df_larv['Area'] = df_larv.get('Area','').astype(str).str.strip()
+    df_larv['Year'] = df_larv['Date'].dt.year
+    df_larv['week'] = df_larv['Date'].dt.isocalendar().week.astype(int)
+
+    # サイドバー（廃止：メイン画面に移動）
+
+    # UI（メイン画面）
+
+    c1, c2 = st.columns([2.0, 1.0])
+
+    with c1:
+
+        mode = st.radio('', ['GSI', 'ラーバ'], index=0, key='map_mode', horizontal=True, label_visibility='collapsed')
+
+
+    years_all = sorted(set(df_gsi['Year'].dropna().unique()).union(set(df_larv['Year'].dropna().unique())))
+
+    if not years_all:
+
+        st.info('年度データがありません。')
+
+        return
+
+
+    with c2:
+
+        sel_year = st.selectbox('', years_all, index=len(years_all)-1, key='map_year', label_visibility='collapsed')
+
+
+    base_df = df_gsi if mode == 'GSI' else df_larv
+
+    weeks_all = sorted(base_df[base_df['Year'] == sel_year]['week'].dropna().astype(int).unique().tolist())
+
+    if not weeks_all:
+
+        st.info('選択年度に週データがありません。')
+
+        return
+
+
+    def week_range(year:int, week:int):
+
+        s = datetime.fromisocalendar(int(year), int(week), 1)
+
+        e = s + timedelta(days=6)
+
+        return s, e
+
+
+    week_labels = []
+
+    for w in weeks_all:
+
+        sdt, edt = week_range(sel_year, int(w))
+
+        week_labels.append((int(w), f'（{sdt:%m/%d}〜{edt:%m/%d}）'))
+
+
+    options = [lab for _, lab in week_labels]
+
+    n = len(options)
+
+
+    if 'map_week_idx' not in st.session_state:
+
+        st.session_state['map_week_idx'] = max(0, n - 1)
+
+
+    st.session_state['map_week_idx'] = min(max(int(st.session_state['map_week_idx']), 0), max(0, n - 1))
+
+
+    # 週（年・週の後に前週/翌週ボタン）
+
+    # 仕様：前週/翌週は segmented_control（無ければ radio）に統一（ボタンには戻さない）。
+    # Streamlit 制約回避：週selectboxの key は map_week_idx_widget、内部の真実は map_week_idx。
+
+    def _clamp_idx(i: int) -> int:
+        return min(max(int(i), 0), max(0, n - 1))
+
+    st.session_state.setdefault('map_week_idx', max(0, n - 1))
+    st.session_state['map_week_idx'] = _clamp_idx(st.session_state.get('map_week_idx', 0))
+    st.session_state.setdefault('map_week_idx_widget', st.session_state['map_week_idx'])
+    st.session_state['map_week_idx_widget'] = _clamp_idx(st.session_state.get('map_week_idx_widget', 0))
+    st.session_state.setdefault('map_week_nav', None)
+
+    def _sync_week_from_widget():
+        st.session_state['map_week_idx'] = _clamp_idx(st.session_state.get('map_week_idx_widget', 0))
+
+    def _nav_week():
+        nav = st.session_state.get('map_week_nav', None)
+        cur = _clamp_idx(st.session_state.get('map_week_idx', 0))
+        if nav == '前週':
+            cur = _clamp_idx(cur - 1)
+        elif nav == '翌週':
+            cur = _clamp_idx(cur + 1)
+        st.session_state['map_week_idx'] = cur
+        st.session_state['map_week_idx_widget'] = cur
+        # 2択は連打しやすいよう None に戻してボタン風にする
+        st.session_state['map_week_nav'] = None
+
+    w_sel, w_nav = st.columns([2.2, 1.6])
+
+    with w_sel:
+        st.selectbox(
+            '', options=list(range(n)),
+            format_func=lambda i: options[i],
+            key='map_week_idx_widget',
+            on_change=_sync_week_from_widget,
+            label_visibility='collapsed'
+        )
+
+    with w_nav:
+        try:
+            st.segmented_control('', options=['前週','翌週'], key='map_week_nav', on_change=_nav_week)
+        except Exception:
+            _opts = ['前週','翌週']
+            _cur = st.session_state.get('map_week_nav', None)
+            _idx = _opts.index(_cur) if _cur in _opts else 0
+            st.radio('', _opts, index=_idx, key='map_week_nav', horizontal=True,
+                     label_visibility='collapsed', on_change=_nav_week)
+
+    sel_week = week_labels[int(st.session_state['map_week_idx'])][0] if n > 0 else None
+    sel_label = week_labels[int(st.session_state['map_week_idx'])][1] if n > 0 else ''
+
+
+
+
+# 対象Area（モードごと）
+    if mode == 'GSI':
+        sub_week_gsi = df_gsi[(df_gsi['Year']==sel_year) & (df_gsi['week']==sel_week)].copy()
+        areas_with_data = sorted(sub_week_gsi['Area'].dropna().astype(str).unique().tolist())
+    else:
+        sub_week_larv = df_larv[(df_larv['Year']==sel_year) & (df_larv['week']==sel_week)].copy()
+        size_cols = [c for c in sub_week_larv.columns if str(c).isdigit()]
+        # ≥200 の合計が正のエリアのみ（コメント対象）
+        areas_with_data = []
+        if size_cols:
+            sw = sub_week_larv.copy()
+            for c in size_cols:
+                sw[c] = pd.to_numeric(sw[c], errors='coerce').fillna(0.0)
+            # 200–259 + ≥260
+            ge200 = sw[[c for c in size_cols if int(c)>=200]].sum(axis=1).sum()
+            # ただし Area 別判定
+            for area, g in sw.groupby('Area'):
+                total_ge200 = float(g[[c for c in size_cols if int(c)>=200]].sum().sum())
+                if total_ge200 > 0:
+                    areas_with_data.append(str(area))
+            areas_with_data = sorted(set(areas_with_data))
+        else:
+            areas_with_data = sorted(sub_week_larv['Area'].dropna().astype(str).unique().tolist())
+
+    # 地図中心
+    if areas_with_data:
+        df_center = df_area[df_area['Area'].isin(areas_with_data)]
+        center_lat = float(df_center['Laf'].mean())
+        center_lon = float(df_center['Lof'].mean())
+    else:
+        center_lat = float(df_area['Laf'].mean())
+        center_lon = float(df_area['Lof'].mean())
+
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=8)
+
+    # 円グラフ色と凡例
+    colors_gsi    = ['#d62728', '#ff7f0e', '#1f77b4']  # ≥25 / 20–24.9 / <20
+    colors_larvae = ['#1f77b4', '#ff7f0e', '#d62728']  # <200 / 200–259 / ≥260
+    legend_gsi = """
+    <div style='background:white;padding:8px 12px;border:1px solid #ccc;border-radius:6px;font-size:13px;min-width:120px;margin-top:8px;'>
+      <b>凡例 (GSI):</b><br>
+      <span style='display:inline-block;width:12px;height:12px;background:#d62728;margin-right:4px;'></span> ≥25<br>
+      <span style='display:inline-block;width:12px;height:12px;background:#ff7f0e;margin-right:4px;'></span> 20–24.9<br>
+      <span style='display:inline-block;width:12px;height:12px;background:#1f77b4;margin-right:4px;'></span> <20
+    </div>
+    """
+    legend_larvae = """
+    <div style='background:white;padding:8px 12px;border:1px solid #ccc;border-radius:6px;font-size:13px;min-width:120px;margin-top:8px;'>
+      <b>凡例 (ラーバ):</b><br>
+      <span style='display:inline-block;width:12px;height:12px;background:#d62728;margin-right:4px;'></span> ≥260<br>
+      <span style='display:inline-block;width:12px;height:12px;background:#ff7f0e;margin-right:4px;'></span> 200–259<br>
+      <span style='display:inline-block;width:12px;height:12px;background:#1f77b4;margin-right:4px;'></span> <200
+    </div>
+    """
+
+    # 円グラフSVG（既存）
+    def svg_pie(values, colors, size=60, labels=None):
+        total = float(sum(values))
+        if total <= 0:
+            return ''
+        nonzeros = [(i, v) for i, v in enumerate(values) if v > 0]
+        cx, cy, r = size/2, size/2, size/2 - 2
+        if len(nonzeros) == 1:
+            i, _ = nonzeros[0]
+            c = colors[i] if colors and i < len(colors) else '#888888'
+            title_text = f"{labels[i]}: {values[i]}" if labels else f"値: {values[i]}"
+            svg = f"""
+            <svg width="{size}" height="{size}" viewBox="0 0 {size} {size}">
+              <circle cx="{cx}" cy="{cy}" r="{r}" fill="{c}" stroke="#fff" stroke-width="2">
+                <title>{title_text}</title>
+              </circle>
+            </svg>
+            """.strip()
+            return svg
+        angles = [(v / total) * 360.0 for v in values]
+        svg = f'<svg width="{size}" height="{size}" viewBox="0 0 {size} {size}">'
+        start_angle = 0.0
+        EPS = 1e-9
+        for i, ang in enumerate(angles):
+            if ang <= EPS:
+                continue
+            end_angle = start_angle + ang
+            x1 = cx + r * np.cos(np.radians(start_angle))
+            y1 = cy + r * np.sin(np.radians(start_angle))
+            x2 = cx + r * np.cos(np.radians(end_angle))
+            y2 = cy + r * np.sin(np.radians(end_angle))
+            large_arc = 1 if ang > 180.0 else 0
+            c = colors[i] if colors and i < len(colors) else '#888888'
+            title_text = f"{labels[i]}: {values[i]}" if labels else f"値: {values[i]}"
+            path = f"M{cx},{cy} L{x1},{y1} A{r},{r} 0 {large_arc},1 {x2},{y2} Z"
+            svg += f'<path d="{path}" fill="{c}" stroke="#fff" stroke-width="2"><title>{title_text}</title></path>'
+            start_angle = end_angle
+        svg += "</svg>"
+        return svg
+
+    # ========== コメント（地図の「上」に表示） ==========
+    # --- コメント強調（色付け） ---
+
+    def emphasize_map_lines(lines):
+        out = []
+        for l in lines:
+            s = str(l)
+
+            # --- GSI の上昇/下降を色付け（部分一致に変更） ---
+            if ('GSI（' in s) and ('上昇' in s or '下降' in s):
+                # 下降：青字
+                s = s.replace('下降', "<span style='color:#1976D2; font-weight:700;'>下降</span>")
+                # 上昇：オレンジ字（必要に応じて赤へ）
+                s = s.replace('上昇', "<span style='color:#FF8F00; font-weight:700;'>上昇</span>")
+                # 変化なしはそのまま（必要なら薄灰などに）
+
+            # --- ラーバ ≥200μm の行は丸ごと赤太字 ---
+            if ('ラーバ ≥200μm 合計' in s) or ('・ラーバ ≥200μm :' in s):
+                s = "<span style='color:#D32F2F; font-weight:700;'>" + s + "</span>"
+
+            # --- 前週比（≥200）は 増加=赤／減少=青（ラーバ用） ---
+            if ('前週比（≥200）' in s) or ('・前週比（≥200）' in s):
+                s = s.replace('増加', "<span style='color:#D32F2F; font-weight:700;'>増加</span>")
+                s = s.replace('減少', "<span style='color:#1976D2; font-weight:700;'>減少</span>")
+            out.append(s)
+        return out
+
+    with st.expander('コメント', expanded=False):  # comment_box を使わない方が安全
+        # GSIモード → GSIがあるAreaのみ / ラーバモード → ≥200合計が正のAreaのみ
+        if not areas_with_data:
+            st.caption("（該当するデータがありません）")
+        else:
+            for area in areas_with_data:
+                lines = []
+                if mode == 'GSI':
+                    g = df_gsi[(df_gsi['Area'] == area) & (df_gsi['Year'] == sel_year) & (df_gsi['week'] == sel_week)].copy()
+                    if not g.empty:
+                        cur_F = float(pd.to_numeric(g.loc[g['Sex'] == 'F', 'GSI'], errors='coerce').mean())
+                        cur_M = float(pd.to_numeric(g.loc[g['Sex'] == 'M', 'GSI'], errors='coerce').mean())
+                        prev_week = max(int(sel_week) - 1, 1)
+                        p = df_gsi[(df_gsi['Area'] == area) & (df_gsi['Year'] == sel_year) & (df_gsi['week'] == prev_week)]
+                        prev_F = float(pd.to_numeric(p.loc[p['Sex'] == 'F', 'GSI'], errors='coerce').mean()) if not p.empty else np.nan
+                        prev_M = float(pd.to_numeric(p.loc[p['Sex'] == 'M', 'GSI'], errors='coerce').mean()) if not p.empty else np.nan
+                        yprev = df_gsi[(df_gsi['Area'] == area) & (df_gsi['Year'] == sel_year - 1) & (df_gsi['week'] == sel_week)]
+                        prevY_F = float(pd.to_numeric(yprev.loc[yprev['Sex'] == 'F', 'GSI'], errors='coerce').mean()) if not yprev.empty else np.nan
+                        prevY_M = float(pd.to_numeric(yprev.loc[yprev['Sex'] == 'M', 'GSI'], errors='coerce').mean()) if not yprev.empty else np.nan
+                        def trend(cur, base, eps=2.0):
+                            if pd.isna(cur) or pd.isna(base): return "データ不足"
+                            d = cur - base
+                            if d > eps: return "上昇"
+                            if d < -eps: return "下降"
+                            return "変化なし"
+                        lines.append(f"・GSI（F）: 平均 {cur_F:.2f}（{trend(cur_F, prev_F if not pd.isna(prev_F) else prevY_F)}）")
+                        lines.append(f"・GSI（M）: 平均 {cur_M:.2f}（{trend(cur_M, prev_M if not pd.isna(prev_M) else prevY_M)}）")
                 else:
-                    html += "<td>-</td>"
-            html += "</tr>\n"
-        html += "</tbody></table></div>"
-        styles2 = get_calendar_css(max_h_vh)
-        full_html = f"<!doctype html><html><head><meta charset='utf-8'>{styles2}</head><body>{html}</body></html>"
-        iframe_height = int(max(400, min(1100, max_h_vh * 10)))
-        st_html(full_html, height=iframe_height, scrolling=True)
+                    g = df_larv[(df_larv['Area'] == area) & (df_larv['Year'] == sel_year) & (df_larv['week'] == sel_week)].copy()
+                    size_cols = [c for c in g.columns if str(c).isdigit()]
+                    if size_cols:
+                        for c in size_cols:
+                            g[c] = pd.to_numeric(g[c], errors='coerce').fillna(0.0)
+                        qty_200_259 = float(g[[c for c in size_cols if 200 <= int(c) <= 259]].sum().sum())
+                        qty_ge260   = float(g[[c for c in size_cols if int(c) >= 260]].sum().sum())
+                        qty_ge200   = qty_200_259 + qty_ge260
+                        if qty_ge200 > 0:
+                            prev_week = max(int(sel_week) - 1, 1)
+                            p  = df_larv[(df_larv['Area'] == area) & (df_larv['Year'] == sel_year) & (df_larv['week'] == prev_week)].copy()
+                            py = df_larv[(df_larv['Area'] == area) & (df_larv['Year'] == sel_year - 1) & (df_larv['week'] == sel_week)].copy()
+                            p_qty_ge200  = np.nan
+                            py_qty_ge200 = np.nan
+                            if not p.empty:
+                                for c in [c for c in p.columns if str(c).isdigit()]:
+                                    p[c] = pd.to_numeric(p[c], errors='coerce').fillna(0.0)
+                                p_qty_ge200 = float(p[[c for c in p.columns if c.isdigit() and int(c) >= 200]].sum().sum())
+                            if not py.empty:
+                                for c in [c for c in py.columns if str(c).isdigit()]:
+                                    py[c] = pd.to_numeric(py[c], errors='coerce').fillna(0.0)
+                                py_qty_ge200 = float(py[[c for c in py.columns if c.isdigit() and int(c) >= 200]].sum().sum())
+                            diff_prev  = qty_ge200 - p_qty_ge200  if not pd.isna(p_qty_ge200)  else np.nan
+                            diff_prevY = qty_ge200 - py_qty_ge200 if not pd.isna(py_qty_ge200) else np.nan
+                            lines.append(f"・ラーバ ≥200μm : 合計 {int(qty_ge200)}（内訳 200–259: {int(qty_200_259)} / ≥260: {int(qty_ge260)}）")
+                            if not pd.isna(diff_prev):
+                                lines.append(f"・前週比（≥200）: {'増加' if diff_prev > 0 else ('減少' if diff_prev < 0 else '変化なし')}（差 {int(diff_prev)}）")
 
-# =========================
-# メイン
-# =========================
+            # 10m水温（DR）も添える（常にArea.csv）（※コメントは値がある場合のみ）
+                cur_t = prev_t = prevY_t = np.nan
+                try:
+                    df_dr = load_dr_single_file(base_dir, f"{area}.csv")
+                except Exception:
+                    df_dr = pd.DataFrame()
+                if not df_dr.empty:
+                    dt = pd.to_datetime(df_dr["datetime"], errors='coerce')
+                    df_dr["week"] = dt.dt.isocalendar().week.astype(int)
+                    df_dr["year"] = dt.dt.year
+                    df_10 = df_dr[(df_dr["depth_m"] == 10) & (df_dr["year"] == sel_year) & (df_dr["week"] == sel_week)].copy()
+                    cur_t = float(pd.to_numeric(df_10.get("pred_temp"), errors='coerce').mean()) if not df_10.empty else np.nan
+                    if not pd.isna(cur_t):
+                        prev_week = max(int(sel_week) - 1, 1)
+                        p10 = df_dr[(df_dr["depth_m"] == 10) & (df_dr["year"] == sel_year) & (df_dr["week"] == prev_week)].copy()
+                        y10 = df_dr[(df_dr["depth_m"] == 10) & (df_dr["year"] == (sel_year - 1)) & (df_dr["week"] == sel_week)].copy()
+                        prev_t  = float(pd.to_numeric(p10.get("pred_temp"), errors='coerce').mean()) if not p10.empty else np.nan
+                        prevY_t = float(pd.to_numeric(y10.get("pred_temp"), errors='coerce').mean()) if not y10.empty else np.nan
+                        def ttrend(cur, base, eps_t=0.3):
+                            if pd.isna(cur) or pd.isna(base): return "データ不足"
+                            d = cur - base
+                            if d > eps_t: return "上昇"
+                            if d < -eps_t: return "下降"
+                            return "変化なし"
+                        diffY_txt = (f"{(cur_t - prevY_t):+.1f}℃" if not pd.isna(prevY_t) else "データ不足")
+                        lines.append(f"・水温（10m）: 平均 {cur_t:.1f}℃／前週比 {ttrend(cur_t, prev_t)}／前年同期差 {diffY_txt}")
+
+                # コメントが1つ以上ある場合のみ表示（空なら完全に非表示）
+                if lines:
+                    em_lines = emphasize_map_lines(lines)
+                    st.markdown(
+                        f"<div><b>{area}</b> {sel_label}</div>"
+                        + "".join([f"<p style='margin:2px 0 0 0;'>{s}</p>" for s in em_lines]),
+                        unsafe_allow_html=True
+                    )
+
+
+    # ========== 地図の描画（マーカーは円グラフのみ） ==========
+    for _, row in df_area.iterrows():
+        area = str(row.get('Area')).strip()
+        if area == '' or (areas_with_data and area not in areas_with_data):
+            continue
+        lat, lon = float(row.get('Laf')), float(row.get('Lof'))
+        if mode == 'GSI':
+            sub = df_gsi[(df_gsi['Area']==area) & (df_gsi['Year']==sel_year) & (df_gsi['week']==sel_week)].copy()
+            n25   = int((sub['GSI']>=25).sum())
+            n20_  = int(((sub['GSI']>=20) & (sub['GSI']<25)).sum())
+            nlt20 = int((sub['GSI']<20).sum())
+            values = [n25, n20_, nlt20]; labels = ['≥25','20–24.9','<20']
+            colors = colors_gsi; size = 60; area_label = area
+        else:
+            sub = df_larv[(df_larv['Area']==area) & (df_larv['Year']==sel_year) & (df_larv['week']==sel_week)].copy()
+            size_cols = [c for c in sub.columns if str(c).isdigit()]
+            for c in size_cols:
+                sub[c] = pd.to_numeric(sub[c], errors='coerce').fillna(0)
+            lt200 = float(sub[[c for c in size_cols if int(c)<200]].sum().sum()) if size_cols else 0.0
+            mid   = float(sub[[c for c in size_cols if 200<=int(c)<=259]].sum().sum()) if size_cols else 0.0
+            ge260 = float(sub[[c for c in size_cols if int(c)>=260]].sum().sum()) if size_cols else 0.0
+            total = lt200 + mid + ge260
+            values = [lt200, mid, ge260]; labels = ['<200','200–259','≥260']
+            colors = colors_larvae
+            size   = int(min(150, max(30, np.sqrt(total)*10))) if total>0 else 60
+            area_label = f"{area}（{int(total)}）"
+        svg = svg_pie(values, colors, size=size, labels=labels)
+        html = f"<div style='text-align:center;'><div style='font-weight:bold;'>{area_label}</div>{svg}</div>"
+        folium.Marker(location=[lat, lon], icon=folium.DivIcon(html=html)).add_to(m)
+
+    folium_static(m)
+    st.markdown(legend_gsi if mode=='GSI' else legend_larvae, unsafe_allow_html=True)
+
+
+    
 def reset_sidebar_state_for(prefix_keep: str):
-    prefixes = ('sc_', 'larv_', 'water_', 'cal_')
+    """
+    現在のモード用 prefix 以外のサイドバー関連セッションキーを掃除する。
+    例: prefix_keep='map_' なら map_ 以外（sc_, larv_, water_, cal_ など）を削除。
+    """
+    prefixes = ('map_', 'sc_', 'larv_', 'water_', 'cal_')
+    # list(...) でコピーしながら走査（削除によるRuntimeError回避）
     for k in list(st.session_state.keys()):
+        # 既知の接頭辞に一致 かつ 「保持したい prefix」ではない
         if k.startswith(prefixes) and not k.startswith(prefix_keep):
             try:
                 del st.session_state[k]
             except KeyError:
+                # 競合・同時削除が起きても無害化
                 pass
 
 def main():
-    st.set_page_config(layout="wide")
 
     try:
+        inject_compact_css()
+    except Exception:
+        pass
+    # カラムを使わずフル幅で表示
+    try:
         mode = st.segmented_control(
-            "モード選択",
-            options=["カレンダー", "デモ1", "デモ2", "デモ3"],
+            '',
+            options=["カレンダー", "水温", "地図", "ラーバ"],
             key="main_mode",
-            default="カレンダー"
+            default="カレンダー",
+            label_visibility="collapsed"
         )
     except Exception:
         mode = st.radio(
-            "モード選択",
-            options=["カレンダー", "デモ1", "デモ2", "デモ3"],
+            '',
+            options=["カレンダー", "水温", "地図", "ラーバ"],
             index=0,
             horizontal=True,
-            key="main_mode"
+            key="main_mode",
+            label_visibility="collapsed"
         )
-    areas_all = load_all_areas()
-    areas_all = load_all_areas()
 
+    # 以降は既存の分岐のままでOK
+    # すべてのArea候補（必要モードのみで使用）
     # ---- サイドバーUI（条件表示）----
     sel_areas = None
     with st.sidebar:
-        if mode == "デモ1":
-            st.caption("")
+        pass
 
-        if mode in ("デモ1", "デモ2", "デモ3"):
-            if mode == "デモ1":
-                key_areas = "water_areas"
-            elif mode == "デモ2":
-                key_areas = "larv_areas"
-            else:  # "採苗数"
-                key_areas = "sc_areas"
-
-            sel_areas = st.multiselect(
-                "エリア選択（複数可）",
-                options=areas_all,
-                default=[],
-                key=key_areas
-            )
-
-    if mode == "デモ1":
+    # ---- 分岐（サイドバーの残留掃除を各モード直前に実施）----
+    if mode == "水温":
         reset_sidebar_state_for('water_')
-        render_water_with_optional_gsi_overlay(selected_areas_for_gsi=sel_areas)
+        render_water_mode()
 
-    elif mode == "デモ2":
+    elif mode == "ラーバ":
         reset_sidebar_state_for('larv_')
         render_larvae_mode(sel_areas)
-
-    elif mode == "デモ3":
-        reset_sidebar_state_for('sc_')
-        render_scallop_mode(sel_areas)
 
     elif mode == "地図":
         reset_sidebar_state_for('map_')
@@ -2059,7 +3207,6 @@ def main():
 
     else:  # "カレンダー"
         reset_sidebar_state_for('cal_')
-        # ★ ここが抜けていたため表示されない
         render_calendar_mode()
 
 if __name__ == "__main__":
