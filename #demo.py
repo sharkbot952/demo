@@ -30,7 +30,6 @@ def pjoin(*parts: str) -> str:
 MATURITY_PATH = pjoin(base_dir, "maturity.csv")          
 LARVAE_PATH   = pjoin(base_dir, "larvae.csv")            
 
-COLLECTOR_NUMBER_PATH = pjoin(base_dir, "collector_number.csv")
 TITLE_SIZE = 18
 TEMP_MIN, TEMP_MAX = -2.0, 40.0
 
@@ -129,7 +128,7 @@ def filter_by_areas(df, areas):
     return df
 
 @st.cache_data(show_spinner=False)
-def read_csv_path(path: str, try_encodings=("utf-8", "utf-8-sig", "cp932"), fp: str = ""):
+def read_csv_path(path: str, try_encodings=("utf-8", "utf-8-sig", "cp932")):
     last_err = None
     for enc in try_encodings:
         try:
@@ -1288,232 +1287,6 @@ def render_larvae_mode(selected_areas: Optional[List[str]]):
         if i < len(sel_areas_main or []) - 1:
             st.markdown("---")
 
-
-
-
-
-# =========================
-# 経年比較モード（大型ラーバ累積 × 付着数 合算）
-# - X: Drop_Date 以降、Monitoring_Date 前までの 大型ラーバ(>=250)累積
-# - Y: Place をまとめた Scallop 合計（Monitoring_Date 時点の累積付着数）
-# - 色: 投入年（Drop_Date の年）※カテゴリ（凡例）
-# - 濃淡: 同一年・同一Areaの DropDate の早遅（早いほど薄い）
-# - 点サイズ: (Monitoring_Date - Drop_Date) の日数
-# - 表示: エリアは選択式（ALL / 1エリア）
-# - 重要: read_csv_path は cache されるため、fp(指紋) を渡してファイル更新を反映
-# =========================
-
-def render_yearly_compare_mode():
-    import streamlit as st
-    import pandas as pd
-    import numpy as np
-    import plotly.express as px
-    import plotly.graph_objects as go
-
-    df_l = read_csv_path(LARVAE_PATH, fp=file_fingerprint(LARVAE_PATH))
-    df_c = read_csv_path(COLLECTOR_NUMBER_PATH, fp=file_fingerprint(COLLECTOR_NUMBER_PATH))
-    if df_l is None or df_c is None:
-        st.stop()
-    if df_l.empty:
-        st.warning("larvae.csv が空です")
-        return
-    if df_c.empty:
-        st.warning("collector_number.csv が空です")
-        return
-
-    # ---------- larvae（日別 大型>=250） ----------
-    df_l = df_l.copy()
-    df_l["Date"] = pd.to_datetime(df_l.get("Date"), errors="coerce")
-    df_l["Area"] = df_l.get("Area", "").astype(str).str.strip()
-
-    size_cols = [c for c in df_l.columns if str(c).isdigit()]
-    for c in size_cols:
-        df_l[c] = pd.to_numeric(df_l[c], errors="coerce").fillna(0.0)
-    large_cols = [c for c in size_cols if int(c) >= 250]
-    df_l["X_large_day"] = df_l[large_cols].sum(axis=1) if large_cols else 0.0
-
-    df_l = df_l.dropna(subset=["Date", "Area"]).copy()
-    if df_l.empty:
-        st.info("larvae.csv の有効行がありません")
-        return
-
-    df_l["date"] = df_l["Date"].dt.date
-    df_l_day = (
-        df_l.groupby(["Area", "date"], as_index=False)["X_large_day"]
-            .sum()
-    )
-    larv_by_area = {a: g[["date", "X_large_day"]].copy()
-                    for a, g in df_l_day.groupby("Area", sort=False)}
-
-    # ---------- collector（イベント: Area×Drop×Monitoring / Place合算） ----------
-    df_c = df_c.copy()
-    df_c["Drop_Date"] = pd.to_datetime(df_c.get("Drop_Date"), errors="coerce")
-    df_c["Monitoring_Date"] = pd.to_datetime(df_c.get("Monitoring_Date"), errors="coerce")
-    df_c["Area"] = df_c.get("Area", "").astype(str).str.strip()
-    df_c["Scallop"] = pd.to_numeric(df_c.get("Scallop"), errors="coerce")
-    df_c = df_c.dropna(subset=["Drop_Date", "Monitoring_Date", "Area", "Scallop"]).copy()
-    if df_c.empty:
-        st.info("collector_number.csv の有効行がありません")
-        return
-
-    # 投入年は Drop_Date(datetime) から
-    df_c["Drop_Year"] = df_c["Drop_Date"].dt.year.astype(int)
-
-    # Place 合算（Area×Drop×Monitoring で1点）
-    df_c["Drop_day"] = df_c["Drop_Date"].dt.date
-    df_c["Monitoring_day"] = df_c["Monitoring_Date"].dt.date
-    df_e = (
-        df_c.groupby(["Area", "Drop_day", "Monitoring_day"], as_index=False)
-            .agg(Y_total=("Scallop", "sum"), Drop_Year=("Drop_Year", "first"))
-            .rename(columns={"Drop_day": "Drop_Date", "Monitoring_day": "Monitoring_Date"})
-    )
-
-    df_e["duration_days"] = (pd.to_datetime(df_e["Monitoring_Date"]) - pd.to_datetime(df_e["Drop_Date"]))
-    df_e["duration_days"] = pd.to_numeric(df_e["duration_days"].dt.days, errors="coerce")
-    df_e = df_e.dropna(subset=["duration_days"]).copy()
-    df_e["duration_days"] = df_e["duration_days"].astype(int)
-
-    if df_e.empty:
-        st.info("有効なイベントがありません")
-        return
-
-    # ---------- X_total / overlap_days（行ごと計算） ----------
-    def _calc_x(row):
-        larv = larv_by_area.get(row["Area"])
-        if larv is None or larv.empty:
-            return 0.0, 0
-        drop = row["Drop_Date"]
-        mon = row["Monitoring_Date"]
-        # 仕様：Monitoring当日は含めない（< mon）
-        m = (larv["date"] >= drop) & (larv["date"] < mon)
-        return float(larv.loc[m, "X_large_day"].sum()), int(m.sum())
-
-    tmp = df_e.apply(_calc_x, axis=1, result_type="expand")
-    tmp.columns = ["X_total", "overlap_days"]
-    df_plot = pd.concat([df_e, tmp], axis=1)
-
-    df_plot = df_plot[df_plot["overlap_days"] > 0].copy()
-    if df_plot.empty:
-        st.info("ラーバ採取日がイベント期間に重なるデータがありません")
-        return
-
-    # エリア選択（ALL / 1エリア）
-    areas = sorted(df_plot["Area"].dropna().astype(str).unique().tolist())
-    area_sel = st.selectbox("エリア", ["ALL"] + areas, index=0, key="yc_area_sel")
-    if area_sel != "ALL":
-        df_plot = df_plot[df_plot["Area"] == area_sel].copy()
-        if df_plot.empty:
-            st.info("選択エリアのデータがありません")
-            return
-
-    # 年（色）準備
-    df_plot["Drop_Year"] = pd.to_numeric(df_plot["Drop_Year"], errors="coerce")
-    df_plot = df_plot.dropna(subset=["Drop_Year"]).copy()
-    df_plot["Drop_Year"] = df_plot["Drop_Year"].astype(int)
-    df_plot["Drop_Year_cat"] = df_plot["Drop_Year"].astype(str)
-    years_present = sorted(df_plot["Drop_Year"].unique().tolist())
-
-    # 表示用
-    df_plot["X_total_disp"] = df_plot["X_total"].round(2)
-    df_plot["Y_total_disp"] = df_plot["Y_total"].round(0).astype(int)
-
-    # 同じ板（Area + Drop_Date）を識別
-    df_plot["line_id"] = df_plot["Area"].astype(str) + " | " + df_plot["Drop_Date"].astype(str)
-    df_plot = df_plot.sort_values(["Area", "Drop_Date", "Monitoring_Date"]).copy()
-
-    # ★形状で「同一年・同一Area内の DropDate 早遅」を表現
-    df_plot["Drop_rank_in_year"] = (
-        df_plot.groupby(["Area", "Drop_Year"])["Drop_Date"]
-               .rank(method="dense", ascending=True)
-               .astype(int)
-    )
-
-    # ランク→マーカー形状（○△□…）: 多い場合は循環
-    rank_symbols = ["circle", "triangle-up", "square", "diamond", "cross", "x"]
-    df_plot["symbol"] = df_plot["Drop_rank_in_year"].apply(
-        lambda r: rank_symbols[(int(r) - 1) % len(rank_symbols)]
-    )
-
-    # 点サイズ（duration_days → 最大40にスケール、最小6）
-    size_max = 40.0
-    size_min = 6.0
-    v = pd.to_numeric(df_plot["duration_days"], errors="coerce").fillna(0).astype(float).values
-    vmax = float(np.nanmax(v)) if len(v) else 0.0
-    if vmax > 0:
-        sizes = size_min + (v / vmax) * (size_max - size_min)
-    else:
-        sizes = np.full_like(v, size_min, dtype=float)
-    df_plot["marker_size"] = sizes
-
-    # 年→色マップ
-    palette = px.colors.qualitative.Dark24
-    year_to_color = {str(y): palette[i % len(palette)] for i, y in enumerate(years_present)}
-
-    # 凡例は年のみ（シンプルに）：年ごとに1回だけ出す
-    shown_legend_year = set()
-
-    fig = go.Figure()
-
-    # 描画：線＋点（線は控えめ・形状は点で表現）
-    for line_id, g in df_plot.groupby("line_id", sort=False):
-        if g.empty:
-            continue
-
-        year_cat = str(g["Drop_Year_cat"].iloc[0])
-        color = year_to_color.get(year_cat, "#1f77b4")
-        symbol = str(g["symbol"].iloc[0])  # 同じ板は DropDate 同じなので基本固定
-
-        show_legend = year_cat not in shown_legend_year
-        if show_legend:
-            shown_legend_year.add(year_cat)
-
-        fig.add_trace(go.Scatter(
-            x=g["X_total"],
-            y=g["Y_total"],
-            mode="lines+markers",
-            line=dict(color=color, width=1.2, dash="dot"),  # 控えめ
-            marker=dict(
-                symbol=symbol,
-                size=g["marker_size"],
-                color=color,
-                opacity=0.85,
-                line=dict(color="rgba(0,0,0,0.25)", width=0.8),
-            ),
-            name=year_cat,
-            legendgroup=year_cat,
-            showlegend=show_legend,
-            customdata=np.stack([
-                g["Area"].astype(str).values,
-                g["Drop_Date"].astype(str).values,
-                g["Monitoring_Date"].astype(str).values,
-                g["duration_days"].astype(int).values,
-                g["overlap_days"].astype(int).values,
-                g["X_total_disp"].astype(float).values,
-                g["Y_total_disp"].astype(int).values,
-            ], axis=1),
-            hovertemplate=(
-                "Area: %{customdata[0]}<br>"
-                "Drop_Date: %{customdata[1]}<br>"
-                "Monitoring_Date: %{customdata[2]}<br>"
-                "期間（日）: %{customdata[3]}<br>"
-                "ラーバ観測日数: %{customdata[4]}<br>"
-                "大型ラーバ累積: %{customdata[5]}<br>"
-                "付着数（累積）: %{customdata[6]}<br>"
-                "<extra></extra>"
-            ),
-        ))
-
-    # タイトル・余計な注釈なし（シンプル）
-    fig.update_layout(
-        template="plotly_white",
-        height=650,
-        margin=dict(l=10, r=10, t=10, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
-    )
-    fig.update_xaxes(title_text="大型ラーバ累積（>=250）")
-    fig.update_yaxes(title_text="付着数（累積・Place合算）")
-
-    st.plotly_chart(fig, use_container_width=True)
 
 # =========================
 # カレンダー部品（wt_test 由来）
@@ -3376,7 +3149,7 @@ def reset_sidebar_state_for(prefix_keep: str):
     現在のモード用 prefix 以外のサイドバー関連セッションキーを掃除する。
     例: prefix_keep='map_' なら map_ 以外（sc_, larv_, water_, cal_ など）を削除。
     """
-    prefixes = ('map_', 'sc_', 'larv_', 'yc_', 'water_', 'cal_')
+    prefixes = ('map_', 'sc_', 'larv_', 'water_', 'cal_')
     # list(...) でコピーしながら走査（削除によるRuntimeError回避）
     for k in list(st.session_state.keys()):
         # 既知の接頭辞に一致 かつ 「保持したい prefix」ではない
@@ -3397,7 +3170,7 @@ def main():
     try:
         mode = st.segmented_control(
             '',
-            options=["カレンダー", "水温", "地図", "ラーバ", "経年比較"],
+            options=["カレンダー", "水温", "地図", "ラーバ"],
             key="main_mode",
             default="カレンダー",
             label_visibility="collapsed"
@@ -3405,7 +3178,7 @@ def main():
     except Exception:
         mode = st.radio(
             '',
-            options=["カレンダー", "水温", "地図", "ラーバ", "経年比較"],
+            options=["カレンダー", "水温", "地図", "ラーバ"],
             index=0,
             horizontal=True,
             key="main_mode",
@@ -3427,10 +3200,6 @@ def main():
     elif mode == "ラーバ":
         reset_sidebar_state_for('larv_')
         render_larvae_mode(sel_areas)
-
-    elif mode == "経年比較":
-        reset_sidebar_state_for('yc_')
-        render_yearly_compare_mode()
 
     elif mode == "地図":
         reset_sidebar_state_for('map_')
