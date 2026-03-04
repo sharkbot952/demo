@@ -1524,7 +1524,8 @@ def render_yearly_compare_mode():
         fig.add_trace(go.Scatter(
             x=g["X_total"],
             y=g["Y_total"],
-            mode="lines",
+            mode="markers",
+            cliponaxis=False,
             line=dict(color=color, width=1.2),
             showlegend=False,
             hoverinfo="skip"
@@ -1569,49 +1570,54 @@ def render_yearly_compare_mode():
             )
         ))
 
-        # ★矢印（→）：各区間に annotation で矢印を描く
-        # 画面を重くしないため、区間が多すぎる場合は必要なら間引き可
+        # ★矢印（→→→）：短い矢印を線上に複数配置（点と誤認されにくい）
         xs = g["X_total"].astype(float).values
         ys = g["Y_total"].astype(float).values
+
         if len(xs) >= 2:
-            arrow_fracs =[0.33,0.66]
-            ax_list, ay_list, ang_list = [],[],[]
+            # ---- 調整パラメータ ----
+            ARROW_PX = 18           # 矢印の長さ（px）※大きめ推奨
+            ARROW_WIDTH = 2.2       # 矢印の線幅
+            ARROW_SIZE = 1.2        # 矢印ヘッドの大きさ
+            ARROW_FRACS = [0.25, 0.55, 0.85]  # 1区間に3本（→→→）。2本なら [0.33,0.66]
+            OPACITY = 0.85
+
+            # 軸スケール差で角度が潰れないよう正規化（簡易）
+            x_span = float(df_plot["X_total"].max() - df_plot["X_total"].min())
+            y_span = float(df_plot["Y_total"].max() - df_plot["Y_total"].min())
+            x_span = x_span if x_span > 0 else 1.0
+            y_span = y_span if y_span > 0 else 1.0
+
             for i in range(len(xs) - 1):
                 dx = xs[i + 1] - xs[i]
                 dy = ys[i + 1] - ys[i]
-
-        # 区間がほぼ動かない場合はスキップ
                 if abs(dx) < 1e-12 and abs(dy) < 1e-12:
                     continue
 
-        # 区間の角度（右向き triangle を基準）
-                ang = np.degrees(np.arctan2(dy, dx))
+                # 角度（スケール正規化してから角度算出）
+                theta = np.arctan2(dy / y_span, dx / x_span)
+                # 矢印の「尾」をピクセルで後ろに引く（短い→を作る）
+                ax_px = -ARROW_PX * np.cos(theta)
+                ay_px = -ARROW_PX * np.sin(theta)
 
-        # 区間内に複数矢印
-                for f in arrow_fracs:
-                    ax_list.append(xs[i] + dx * f)
-                    ay_list.append(ys[i] + dy * f)
-                    ang_list.append(ang)
+                # 区間内に複数本の短矢印を配置
+                for f in ARROW_FRACS:
+                    px = xs[i] + dx * f
+                    py = ys[i] + dy * f
 
-    # 矢印（→）をまとめて1トレースで追加（軽い）
-            if ax_list:
-                fig.add_trace(go.Scatter(
-                    x=ax_list,
-                    y=ay_list,
-                    mode="markers",
-                    showlegend=False,
-                    hoverinfo="skip",
-                    cliponaxis=False,  # 端で切れにくくする
-                    marker=dict(
-                        symbol="triangle-right",
-                        size=18,                 # ← 矢印を大きめに（見やすい）
-                        color=color,
-                        opacity=0.85,
-                        line=dict(color="rgba(0,0,0,0.25)", width=0.6),
-                        angle=ang_list           # 向きが効く環境なら回転
+                    fig.add_annotation(
+                        x=px, y=py,
+                        ax=ax_px, ay=ay_px,
+                        xref="x", yref="y",
+                        axref="pixel", ayref="pixel",   # ← 重要：矢印長さを px 固定
+                        showarrow=True,
+                        arrowhead=3,
+                        arrowsize=ARROW_SIZE,
+                        arrowwidth=ARROW_WIDTH,
+                        arrowcolor=color,
+                        opacity=OPACITY,
+                        text=""  # 余計な文字なし
                     )
-                ))
-
 
     # ---------- レイアウト ----------
     fig.update_layout(
