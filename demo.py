@@ -1574,19 +1574,44 @@ def render_yearly_compare_mode():
         xs = g["X_total"].astype(float).values
         ys = g["Y_total"].astype(float).values
         if len(xs) >= 2:
+            arrow_fracs =[0.33,0.66]
+	    ax_list, ay_list, ang_list = [],[],[]
             for i in range(len(xs) - 1):
-                fig.add_annotation(
-                    x=xs[i + 1], y=ys[i + 1],
-                    ax=xs[i], ay=ys[i],
-                    xref="x", yref="y",
-                    axref="x", ayref="y",
-                    showarrow=True,
-                    arrowhead=3,
-                    arrowsize=1.0,
-                    arrowwidth=1.2,
-                    arrowcolor=color,
-                    opacity=0.65
-                )
+                dx = xs[i + 1] - xs[i]
+                dy = ys[i + 1] - ys[i]
+
+        # 区間がほぼ動かない場合はスキップ
+                if abs(dx) < 1e-12 and abs(dy) < 1e-12:
+                    continue
+
+        # 区間の角度（右向き triangle を基準）
+                ang = np.degrees(np.arctan2(dy, dx))
+
+        # 区間内に複数矢印
+                for f in arrow_fracs:
+                    ax_list.append(xs[i] + dx * f)
+                    ay_list.append(ys[i] + dy * f)
+                    ang_list.append(ang)
+
+    # 矢印（→）をまとめて1トレースで追加（軽い）
+            if ax_list:
+                fig.add_trace(go.Scatter(
+                    x=ax_list,
+                    y=ay_list,
+                    mode="markers",
+                    showlegend=False,
+                    hoverinfo="skip",
+                    cliponaxis=False,  # 端で切れにくくする
+                    marker=dict(
+                        symbol="triangle-right",
+                        size=18,                 # ← 矢印を大きめに（見やすい）
+                        color=color,
+                        opacity=0.85,
+                        line=dict(color="rgba(0,0,0,0.25)", width=0.6),
+                        angle=ang_list           # 向きが効く環境なら回転
+                    )
+                ))
+
 
     # ---------- レイアウト ----------
     fig.update_layout(
