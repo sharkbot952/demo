@@ -1364,7 +1364,7 @@ def render_yearly_compare_mode():
     df_c["Monitoring_day"] = df_c["Monitoring_Date"].dt.date
     df_e = (
         df_c.groupby(["Area", "Drop_day", "Monitoring_day"], as_index=False)
-            .agg(Y_total=("Scallop", "sum"), Drop_Year=("Drop_Year", "first"))
+            .agg(Y_total=("Scallop", "mean"), Drop_Year=("Drop_Year", "first"))
             .rename(columns={"Drop_day": "Drop_Date", "Monitoring_day": "Monitoring_Date"})
     )
 
