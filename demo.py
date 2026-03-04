@@ -3381,7 +3381,7 @@ def render_map_mode():
         html = f"<div style='text-align:center;'><div style='font-weight:bold;'>{area_label}</div>{svg}</div>"
         folium.Marker(location=[lat, lon], icon=folium.DivIcon(html=html)).add_to(m)
 
-    folium_static(m, height=420)
+    folium_static(m, height=350)
     st.markdown(legend_gsi if mode=='GSI' else legend_larvae, unsafe_allow_html=True)
 
 
