@@ -1570,55 +1570,50 @@ def render_yearly_compare_mode():
             )
         ))
 
-        # ★矢印（→→→）：短い矢印を線上に複数配置（点と誤認されにくい）
+        # ★矢印（ベクトル）：データ座標で「短い→」を複数配置（向きが必ず線分方向になる）
         xs = g["X_total"].astype(float).values
         ys = g["Y_total"].astype(float).values
 
         if len(xs) >= 2:
-            # ---- 調整パラメータ ----
-            ARROW_PX = 18           # 矢印の長さ（px）※大きめ推奨
-            ARROW_WIDTH = 2.2       # 矢印の線幅
-            ARROW_SIZE = 1.2        # 矢印ヘッドの大きさ
-            ARROW_FRACS = [0.25, 0.55, 0.85]  # 1区間に3本（→→→）。2本なら [0.33,0.66]
+            # ---- 調整パラメータ（ここだけ触ればOK）----
+            ARROW_HEAD_FRACS = [0.30, 0.60, 0.90]  # 1区間に→→→（2本なら [0.40, 0.80]）
+            ARROW_LEN_FRAC = 0.14                  # 矢印の長さ（区間長の14%）
+            ARROW_WIDTH = 2.2
+            ARROW_SIZE = 1.1
             OPACITY = 0.85
 
-            # 軸スケール差で角度が潰れないよう正規化（簡易）
-            x_span = float(df_plot["X_total"].max() - df_plot["X_total"].min())
-            y_span = float(df_plot["Y_total"].max() - df_plot["Y_total"].min())
-            x_span = x_span if x_span > 0 else 1.0
-            y_span = y_span if y_span > 0 else 1.0
-
             for i in range(len(xs) - 1):
-                dx = xs[i + 1] - xs[i]
-                dy = ys[i + 1] - ys[i]
+                x0, y0 = xs[i], ys[i]
+                x1, y1 = xs[i + 1], ys[i + 1]
+                dx, dy = (x1 - x0), (y1 - y0)
+
+                # 区間がほぼゼロならスキップ
                 if abs(dx) < 1e-12 and abs(dy) < 1e-12:
                     continue
 
-                # 角度（スケール正規化してから角度算出）
-                theta = np.arctan2(dy / y_span, dx / x_span)
-                # 矢印の「尾」をピクセルで後ろに引く（短い→を作る）
-                ax_px = -ARROW_PX * np.cos(theta)
-                ay_px = -ARROW_PX * np.sin(theta)
+                for f in ARROW_HEAD_FRACS:
+                    # 矢印の先端（head）
+                    hx = x0 + dx * f
+                    hy = y0 + dy * f
 
-                # 区間内に複数本の短矢印を配置
-                for f in ARROW_FRACS:
-                    px = xs[i] + dx * f
-                    py = ys[i] + dy * f
+                    # 矢印の根元（tail）…先端より少し手前
+                    tb = max(0.0, f - ARROW_LEN_FRAC)
+                    tx = x0 + dx * tb
+                    ty = y0 + dy * tb
 
                     fig.add_annotation(
-                        x=px, y=py,
-                        ax=ax_px, ay=ay_px,
+                        x=hx, y=hy,
+                        ax=tx, ay=ty,
                         xref="x", yref="y",
-                        axref="pixel", ayref="pixel",   # ← 重要：矢印長さを px 固定
+                        axref="x", ayref="y",      # ←重要：データ座標
                         showarrow=True,
                         arrowhead=3,
                         arrowsize=ARROW_SIZE,
                         arrowwidth=ARROW_WIDTH,
                         arrowcolor=color,
                         opacity=OPACITY,
-                        text=""  # 余計な文字なし
+                        text=""
                     )
-
     # ---------- レイアウト ----------
     fig.update_layout(
         template="plotly_white",
