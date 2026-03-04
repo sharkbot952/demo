@@ -29,8 +29,9 @@ def pjoin(*parts: str) -> str:
 
 MATURITY_PATH = pjoin(base_dir, "maturity.csv")          
 LARVAE_PATH   = pjoin(base_dir, "larvae.csv")            
-
 COLLECTOR_NUMBER_PATH = pjoin(base_dir, "collector_number.csv")
+
+
 TITLE_SIZE = 18
 TEMP_MIN, TEMP_MAX = -2.0, 40.0
 
@@ -1310,8 +1311,14 @@ def render_yearly_compare_mode():
     import plotly.express as px
     import plotly.graph_objects as go
 
+    # --- 読み込み（既存と同じ） ---
     df_l = read_csv_path(LARVAE_PATH, fp=file_fingerprint(LARVAE_PATH))
     df_c = read_csv_path(COLLECTOR_NUMBER_PATH, fp=file_fingerprint(COLLECTOR_NUMBER_PATH))
+
+    # ★追加：殻サイズ（Shell）読み込み
+    COLLECTOR_SIZE_PATH = pjoin(base_dir, "collector_size.csv")
+    df_s = read_csv_path(COLLECTOR_SIZE_PATH, fp=file_fingerprint(COLLECTOR_SIZE_PATH))
+
     if df_l is None or df_c is None:
         st.stop()
     if df_l.empty:
@@ -1329,6 +1336,7 @@ def render_yearly_compare_mode():
     size_cols = [c for c in df_l.columns if str(c).isdigit()]
     for c in size_cols:
         df_l[c] = pd.to_numeric(df_l[c], errors="coerce").fillna(0.0)
+
     large_cols = [c for c in size_cols if int(c) >= 250]
     df_l["X_large_day"] = df_l[large_cols].sum(axis=1) if large_cols else 0.0
 
@@ -1339,36 +1347,43 @@ def render_yearly_compare_mode():
 
     df_l["date"] = df_l["Date"].dt.date
     df_l_day = (
-        df_l.groupby(["Area", "date"], as_index=False)["X_large_day"]
-            .sum()
+        df_l.groupby(["Area", "date"], as_index=False)["X_large_day"].sum()
     )
-    larv_by_area = {a: g[["date", "X_large_day"]].copy()
-                    for a, g in df_l_day.groupby("Area", sort=False)}
+    larv_by_area = {
+        a: g[["date", "X_large_day"]].copy()
+        for a, g in df_l_day.groupby("Area", sort=False)
+    }
 
-    # ---------- collector（イベント: Area×Drop×Monitoring / Place合算） ----------
+    # ---------- collector_number（イベント: Area×Drop×Monitoring / Place合算） ----------
     df_c = df_c.copy()
     df_c["Drop_Date"] = pd.to_datetime(df_c.get("Drop_Date"), errors="coerce")
     df_c["Monitoring_Date"] = pd.to_datetime(df_c.get("Monitoring_Date"), errors="coerce")
     df_c["Area"] = df_c.get("Area", "").astype(str).str.strip()
     df_c["Scallop"] = pd.to_numeric(df_c.get("Scallop"), errors="coerce")
+
     df_c = df_c.dropna(subset=["Drop_Date", "Monitoring_Date", "Area", "Scallop"]).copy()
     if df_c.empty:
         st.info("collector_number.csv の有効行がありません")
         return
 
-    # 投入年は Drop_Date(datetime) から
     df_c["Drop_Year"] = df_c["Drop_Date"].dt.year.astype(int)
-
-    # Place 合算（Area×Drop×Monitoring で1点）
     df_c["Drop_day"] = df_c["Drop_Date"].dt.date
     df_c["Monitoring_day"] = df_c["Monitoring_Date"].dt.date
+
+    # Place 合算（Area×Drop×Monitoring で1点）
     df_e = (
         df_c.groupby(["Area", "Drop_day", "Monitoring_day"], as_index=False)
-            .agg(Y_total=("Scallop", "mean"), Drop_Year=("Drop_Year", "first"))
+            .agg(
+                Y_total=("Scallop", "mean"),
+                Drop_Year=("Drop_Year", "first")
+            )
             .rename(columns={"Drop_day": "Drop_Date", "Monitoring_day": "Monitoring_Date"})
     )
 
-    df_e["duration_days"] = (pd.to_datetime(df_e["Monitoring_Date"]) - pd.to_datetime(df_e["Drop_Date"]))
+    # 期間（日）も保持（hover用には残す）
+    df_e["duration_days"] = (
+        pd.to_datetime(df_e["Monitoring_Date"]) - pd.to_datetime(df_e["Drop_Date"])
+    )
     df_e["duration_days"] = pd.to_numeric(df_e["duration_days"].dt.days, errors="coerce")
     df_e = df_e.dropna(subset=["duration_days"]).copy()
     df_e["duration_days"] = df_e["duration_days"].astype(int)
@@ -1390,14 +1405,37 @@ def render_yearly_compare_mode():
 
     tmp = df_e.apply(_calc_x, axis=1, result_type="expand")
     tmp.columns = ["X_total", "overlap_days"]
-    df_plot = pd.concat([df_e, tmp], axis=1)
 
+    df_plot = pd.concat([df_e, tmp], axis=1)
     df_plot = df_plot[df_plot["overlap_days"] > 0].copy()
     if df_plot.empty:
         st.info("ラーバ採取日がイベント期間に重なるデータがありません")
         return
 
-    # エリア選択（ALL / 1エリア）
+    # ---------- ★ Shell(mm) 平均をイベントに付与（collector_size.csv） ----------
+    # collector_size.csv の列：Drop_Date, Monitoring_Date, Area, Place, Shell(mm) [2](https://dogyoren-my.sharepoint.com/personal/m-takahashi_gyoren_or_jp/_layouts/15/Doc.aspx?sourcedoc=%7BAC1565FB-567C-483F-9119-1807F8DC2BED%7D&file=collector_size.csv&action=default&mobileredirect=true)
+    if df_s is None or df_s.empty:
+        shell_mean = pd.DataFrame(columns=["Area", "Drop_Date", "Monitoring_Date", "shell_mean"])
+    else:
+        df_s = df_s.copy()
+        df_s["Drop_Date"] = pd.to_datetime(df_s.get("Drop_Date"), errors="coerce").dt.date
+        df_s["Monitoring_Date"] = pd.to_datetime(df_s.get("Monitoring_Date"), errors="coerce").dt.date
+        df_s["Area"] = df_s.get("Area", "").astype(str).str.strip()
+        df_s["Shell(mm)"] = pd.to_numeric(df_s.get("Shell(mm)"), errors="coerce")
+
+        shell_mean = (
+            df_s.dropna(subset=["Area", "Drop_Date", "Monitoring_Date", "Shell(mm)"])
+                .groupby(["Area", "Drop_Date", "Monitoring_Date"], as_index=False)
+                .agg(shell_mean=("Shell(mm)", "mean"))
+        )
+
+    df_plot = df_plot.merge(
+        shell_mean,
+        on=["Area", "Drop_Date", "Monitoring_Date"],
+        how="left"
+    )
+
+    # ---------- UI（エリア選択） ----------
     areas = sorted(df_plot["Area"].dropna().astype(str).unique().tolist())
     area_sel = st.selectbox("エリア", ["ALL"] + areas, index=0, key="yc_area_sel")
     if area_sel != "ALL":
@@ -1411,77 +1449,102 @@ def render_yearly_compare_mode():
     df_plot = df_plot.dropna(subset=["Drop_Year"]).copy()
     df_plot["Drop_Year"] = df_plot["Drop_Year"].astype(int)
     df_plot["Drop_Year_cat"] = df_plot["Drop_Year"].astype(str)
+
     years_present = sorted(df_plot["Drop_Year"].unique().tolist())
 
-    # 表示用
+    # 表示用の丸め
     df_plot["X_total_disp"] = df_plot["X_total"].round(2)
     df_plot["Y_total_disp"] = df_plot["Y_total"].round(0).astype(int)
 
-    # 同じ板（Area + Drop_Date）を識別
-    df_plot["line_id"] = df_plot["Area"].astype(str) + " | " + df_plot["Drop_Date"].astype(str)
+    # 同じ板（Area + Drop_Date）を識別（時系列線の単位）
+    df_plot["line_id"] = df_plot["Area"].astype(str) + " " + df_plot["Drop_Date"].astype(str)
+
+    # ★ Monitoring_Date 順で時系列
     df_plot = df_plot.sort_values(["Area", "Drop_Date", "Monitoring_Date"]).copy()
 
-    # ★形状で「同一年・同一Area内の DropDate 早遅」を表現
-    df_plot["Drop_rank_in_year"] = (
-        df_plot.groupby(["Area", "Drop_Year"])["Drop_Date"]
-               .rank(method="dense", ascending=True)
-               .astype(int)
-    )
+    # ---------- ★ Shell 欠損を「前後の時系列平均」で補完 ----------
+    # 同一 Area×Drop_Date 内で、Monitoring_Date の前後を参照して補完
+    df_plot["shell_filled"] = df_plot["shell_mean"]
 
-    # ランク→マーカー形状（○△□…）: 多い場合は循環
-    rank_symbols = ["circle", "triangle-up", "square", "diamond", "cross", "x"]
-    df_plot["symbol"] = df_plot["Drop_rank_in_year"].apply(
-        lambda r: rank_symbols[(int(r) - 1) % len(rank_symbols)]
-    )
+    for (a, d), g in df_plot.groupby(["Area", "Drop_Date"], sort=False):
+        # Monitoring_Date 順を保証
+        g = g.sort_values("Monitoring_Date")
+        prev = g["shell_mean"].ffill()
+        nxt = g["shell_mean"].bfill()
 
-    # 点サイズ（duration_days → 最大40にスケール、最小6）
-    size_max = 40.0
+        filled = g["shell_mean"].copy()
+        m = filled.isna()
+
+        both = m & prev.notna() & nxt.notna()
+        only_prev = m & prev.notna() & nxt.isna()
+        only_next = m & prev.isna() & nxt.notna()
+
+        filled.loc[both] = 0.5 * (prev.loc[both] + nxt.loc[both])
+        filled.loc[only_prev] = prev.loc[only_prev]
+        filled.loc[only_next] = nxt.loc[only_next]
+
+        df_plot.loc[g.index, "shell_filled"] = filled.values
+
+    # ---------- ★ マーカーサイズ：shell_filled を 6～40 にスケール ----------
     size_min = 6.0
-    v = pd.to_numeric(df_plot["duration_days"], errors="coerce").fillna(0).astype(float).values
-    vmax = float(np.nanmax(v)) if len(v) else 0.0
-    if vmax > 0:
-        sizes = size_min + (v / vmax) * (size_max - size_min)
-    else:
-        sizes = np.full_like(v, size_min, dtype=float)
-    df_plot["marker_size"] = sizes
+    size_max = 40.0
+    v = pd.to_numeric(df_plot["shell_filled"], errors="coerce")
+    vmin = float(v.min()) if v.notna().any() else np.nan
+    vmax = float(v.max()) if v.notna().any() else np.nan
 
-    # 年→色マップ
+    if pd.notna(vmin) and pd.notna(vmax) and vmax > vmin:
+        df_plot["marker_size"] = size_min + (v - vmin) / (vmax - vmin) * (size_max - size_min)
+    else:
+        df_plot["marker_size"] = size_min
+
+    df_plot["marker_size"] = df_plot["marker_size"].fillna(size_min)
+
+    # ---------- 年→色マップ ----------
     palette = px.colors.qualitative.Dark24
     year_to_color = {str(y): palette[i % len(palette)] for i, y in enumerate(years_present)}
 
-    # 凡例は年のみ（シンプルに）：年ごとに1回だけ出す
+    # 凡例は年のみ
     shown_legend_year = set()
-
     fig = go.Figure()
 
-    # 描画：線＋点（線は控えめ・形状は点で表現）
+    # ---------- 描画：線＋点＋矢印（Monitoring_Date の順） ----------
     for line_id, g in df_plot.groupby("line_id", sort=False):
         if g.empty:
             continue
 
+        g = g.sort_values("Monitoring_Date").copy()
         year_cat = str(g["Drop_Year_cat"].iloc[0])
         color = year_to_color.get(year_cat, "#1f77b4")
-        symbol = str(g["symbol"].iloc[0])  # 同じ板は DropDate 同じなので基本固定
 
         show_legend = year_cat not in shown_legend_year
         if show_legend:
             shown_legend_year.add(year_cat)
 
+        # 線（控えめ）
         fig.add_trace(go.Scatter(
             x=g["X_total"],
             y=g["Y_total"],
-            mode="lines+markers",
-            line=dict(color=color, width=1.2, dash="dot"),  # 控えめ
+            mode="lines",
+            line=dict(color=color, width=1.2),
+            showlegend=False,
+            hoverinfo="skip"
+        ))
+
+        # 点（丸）
+        fig.add_trace(go.Scatter(
+            x=g["X_total"],
+            y=g["Y_total"],
+            mode="markers",
+            name=year_cat,
+            legendgroup=year_cat,
+            showlegend=show_legend,
             marker=dict(
-                symbol=symbol,
+                symbol="circle",
                 size=g["marker_size"],
                 color=color,
                 opacity=0.85,
                 line=dict(color="rgba(0,0,0,0.25)", width=0.8),
             ),
-            name=year_cat,
-            legendgroup=year_cat,
-            showlegend=show_legend,
             customdata=np.stack([
                 g["Area"].astype(str).values,
                 g["Drop_Date"].astype(str).values,
@@ -1490,6 +1553,8 @@ def render_yearly_compare_mode():
                 g["overlap_days"].astype(int).values,
                 g["X_total_disp"].astype(float).values,
                 g["Y_total_disp"].astype(int).values,
+                pd.to_numeric(g["shell_mean"], errors="coerce").round(2).values,     # raw shell
+                pd.to_numeric(g["shell_filled"], errors="coerce").round(2).values,  # filled shell
             ], axis=1),
             hovertemplate=(
                 "Area: %{customdata[0]}<br>"
@@ -1497,13 +1562,33 @@ def render_yearly_compare_mode():
                 "Monitoring_Date: %{customdata[2]}<br>"
                 "期間（日）: %{customdata[3]}<br>"
                 "ラーバ観測日数: %{customdata[4]}<br>"
-                "大型ラーバ累積: %{customdata[5]}<br>"
-                "付着数（累積）: %{customdata[6]}<br>"
-                "<extra></extra>"
-            ),
+                "大型ラーバ累積(>=250): %{customdata[5]}<br>"
+                "付着数（平均）: %{customdata[6]}<br>"
+                "Shell平均(mm): %{customdata[7]}<br>"
+                "Shell補完(mm): %{customdata[8]}<br>"
+            )
         ))
 
-    # タイトル・余計な注釈なし（シンプル）
+        # ★矢印（→）：各区間に annotation で矢印を描く
+        # 画面を重くしないため、区間が多すぎる場合は必要なら間引き可
+        xs = g["X_total"].astype(float).values
+        ys = g["Y_total"].astype(float).values
+        if len(xs) >= 2:
+            for i in range(len(xs) - 1):
+                fig.add_annotation(
+                    x=xs[i + 1], y=ys[i + 1],
+                    ax=xs[i], ay=ys[i],
+                    xref="x", yref="y",
+                    axref="x", ayref="y",
+                    showarrow=True,
+                    arrowhead=3,
+                    arrowsize=1.0,
+                    arrowwidth=1.2,
+                    arrowcolor=color,
+                    opacity=0.65
+                )
+
+    # ---------- レイアウト ----------
     fig.update_layout(
         template="plotly_white",
         height=650,
@@ -1511,7 +1596,7 @@ def render_yearly_compare_mode():
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
     )
     fig.update_xaxes(title_text="大型ラーバ累積（>=250）")
-    fig.update_yaxes(title_text="付着数（累積・段平均）")
+    fig.update_yaxes(title_text="付着数（平均・Place合算）")
 
     st.plotly_chart(fig, use_container_width=True)
 
