@@ -3154,7 +3154,7 @@ def render_map_mode():
         center_lat = float(df_area['Laf'].mean())
         center_lon = float(df_area['Lof'].mean())
 
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=8)
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=8, max_bounds=True)
 
     # --- 表示対象（areas_with_data があればそれだけ、無ければ全エリア）から bounds を作る ---
     df_bounds = df_area[df_area['Area'].isin(areas_with_data)].copy() if areas_with_data else df_area.copy()
