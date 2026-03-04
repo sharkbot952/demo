@@ -1412,28 +1412,64 @@ def render_yearly_compare_mode():
         st.info("ラーバ採取日がイベント期間に重なるデータがありません")
         return
 
-    # ---------- ★ Shell(mm) 平均をイベントに付与（collector_size.csv） ----------
-    # collector_size.csv の列：Drop_Date, Monitoring_Date, Area, Place, Shell(mm) [2](https://dogyoren-my.sharepoint.com/personal/m-takahashi_gyoren_or_jp/_layouts/15/Doc.aspx?sourcedoc=%7BAC1565FB-567C-483F-9119-1807F8DC2BED%7D&file=collector_size.csv&action=default&mobileredirect=true)
+    # ---------- ★ Shell(mm) 平均をイベントに付与（collector_size.csv｜近傍マッチ） ----------
+    # 目的：殻長データは Monitoring_Date が数日ズレることがあるため、完全一致ではなく
+    #       「同一 Area × Drop_Date 内で Monitoring_Date 最近傍（tolerance付き）」で紐付ける。
+    SHELL_TOL_DAYS = 5  # ←許容日数（±N日）。必要なら調整
+
+    # collector_size.csv の想定列：Drop_Date, Monitoring_Date, Area, Place, Shell(mm)
     if df_s is None or df_s.empty:
-        shell_mean = pd.DataFrame(columns=["Area", "Drop_Date", "Monitoring_Date", "shell_mean"])
+        df_plot["shell_mean"] = np.nan
+        df_plot["shell_n"] = np.nan
     else:
         df_s = df_s.copy()
-        df_s["Drop_Date"] = pd.to_datetime(df_s.get("Drop_Date"), errors="coerce").dt.date
-        df_s["Monitoring_Date"] = pd.to_datetime(df_s.get("Monitoring_Date"), errors="coerce").dt.date
+        df_s["Drop_Date"] = pd.to_datetime(df_s.get("Drop_Date"), errors="coerce")
+        df_s["Monitoring_Date"] = pd.to_datetime(df_s.get("Monitoring_Date"), errors="coerce")
         df_s["Area"] = df_s.get("Area", "").astype(str).str.strip()
-        df_s["Shell(mm)"] = pd.to_numeric(df_s.get("Shell(mm)"), errors="coerce")
 
-        shell_mean = (
-            df_s.dropna(subset=["Area", "Drop_Date", "Monitoring_Date", "Shell(mm)"])
-                .groupby(["Area", "Drop_Date", "Monitoring_Date"], as_index=False)
-                .agg(shell_mean=("Shell(mm)", "mean"))
-        )
+        # 殻長列名の揺れを吸収
+        shell_col = None
+        for cand in ["Shell(mm)", "Shell", "Shell_mm", "shell", "shell_mm", "殻長", "殻長(mm)"]:
+            if cand in df_s.columns:
+                shell_col = cand
+                break
 
-    df_plot = df_plot.merge(
-        shell_mean,
-        on=["Area", "Drop_Date", "Monitoring_Date"],
-        how="left"
-    )
+        if shell_col is None:
+            df_plot["shell_mean"] = np.nan
+            df_plot["shell_n"] = np.nan
+        else:
+            df_s[shell_col] = pd.to_numeric(df_s.get(shell_col), errors="coerce")
+
+            # 日別平均へ集約（同日複数個体/複数Place対応）
+            shell_daily = (
+                df_s.dropna(subset=["Area", "Drop_Date", "Monitoring_Date", shell_col])
+                    .assign(
+                        Drop_Date_dt=lambda d: d["Drop_Date"].dt.floor("D"),
+                        Monitoring_Date_dt=lambda d: d["Monitoring_Date"].dt.floor("D"),
+                    )
+                    .groupby(["Area", "Drop_Date_dt", "Monitoring_Date_dt"], as_index=False)
+                    .agg(shell_mean=(shell_col, "mean"), shell_n=(shell_col, "count"))
+            )
+
+            df_plot = df_plot.assign(
+                Drop_Date_dt=pd.to_datetime(df_plot["Drop_Date"], errors="coerce").dt.floor("D"),
+                Monitoring_Date_dt=pd.to_datetime(df_plot["Monitoring_Date"], errors="coerce").dt.floor("D"),
+            )
+
+            # 最近傍マッチ（同一 Area × Drop_Date_dt 内で Monitoring_Date_dt 最近傍）
+            df_plot = df_plot.sort_values(["Area", "Drop_Date_dt", "Monitoring_Date_dt"]).copy()
+            shell_daily = shell_daily.sort_values(["Area", "Drop_Date_dt", "Monitoring_Date_dt"]).copy()
+
+            df_plot = pd.merge_asof(
+                df_plot,
+                shell_daily,
+                left_on="Monitoring_Date_dt",
+                right_on="Monitoring_Date_dt",
+                by=["Area", "Drop_Date_dt"],
+                direction="nearest",
+                tolerance=pd.Timedelta(days=SHELL_TOL_DAYS),
+                suffixes=("", "_s"),
+            )
 
     # ---------- UI（エリア選択） ----------
     areas = sorted(df_plot["Area"].dropna().astype(str).unique().tolist())
@@ -1507,7 +1543,7 @@ def render_yearly_compare_mode():
     shown_legend_year = set()
     fig = go.Figure()
 
-    # ---------- 描画：線＋点＋矢印（Monitoring_Date の順） ----------
+    # ---------- 描画：線（破線）＋点（Monitoring_Date の順） ----------
     for line_id, g in df_plot.groupby("line_id", sort=False):
         if g.empty:
             continue
@@ -1570,51 +1606,7 @@ def render_yearly_compare_mode():
             )
         ))
 
-        # ★矢印（ベクトル）：データ座標で「短い→」を複数配置（向きが必ず線分方向になる）
-        xs = g["X_total"].astype(float).values
-        ys = g["Y_total"].astype(float).values
-
-        if len(xs) >= 2:
-            # ---- 調整パラメータ（ここだけ触ればOK）----
-            ARROW_HEAD_FRACS = [0.30, 0.60, 0.90]  # 1区間に→→→（2本なら [0.40, 0.80]）
-            ARROW_LEN_FRAC = 0.14                  # 矢印の長さ（区間長の14%）
-            ARROW_WIDTH = 2.2
-            ARROW_SIZE = 1.1
-            OPACITY = 0.85
-
-            for i in range(len(xs) - 1):
-                x0, y0 = xs[i], ys[i]
-                x1, y1 = xs[i + 1], ys[i + 1]
-                dx, dy = (x1 - x0), (y1 - y0)
-
-                # 区間がほぼゼロならスキップ
-                if abs(dx) < 1e-12 and abs(dy) < 1e-12:
-                    continue
-
-                for f in ARROW_HEAD_FRACS:
-                    # 矢印の先端（head）
-                    hx = x0 + dx * f
-                    hy = y0 + dy * f
-
-                    # 矢印の根元（tail）…先端より少し手前
-                    tb = max(0.0, f - ARROW_LEN_FRAC)
-                    tx = x0 + dx * tb
-                    ty = y0 + dy * tb
-
-                    fig.add_annotation(
-                        x=hx, y=hy,
-                        ax=tx, ay=ty,
-                        xref="x", yref="y",
-                        axref="x", ayref="y",      # ←重要：データ座標
-                        showarrow=True,
-                        arrowhead=3,
-                        arrowsize=ARROW_SIZE,
-                        arrowwidth=ARROW_WIDTH,
-                        arrowcolor=color,
-                        opacity=OPACITY,
-                        text=""
-                    )
-    # ---------- レイアウト ----------
+        # ---------- レイアウト ----------
     fig.update_layout(
         template="plotly_white",
         height=650,
