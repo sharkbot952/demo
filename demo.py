@@ -1511,7 +1511,7 @@ def render_yearly_compare_mode():
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
     )
     fig.update_xaxes(title_text="大型ラーバ累積（>=250）")
-    fig.update_yaxes(title_text="付着数（累積・Place合算）")
+    fig.update_yaxes(title_text="付着数（累積・段平均）")
 
     st.plotly_chart(fig, use_container_width=True)
 
