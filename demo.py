@@ -2922,7 +2922,7 @@ def metrics_temp10m(base_dir: str, area: str, year: int, week: int, eps_t: float
     import pandas as pd
     import math
     try:
-        df_dr = load_dr_single_file(base_dir, f"{area}.csv")
+        df_dr = load_dr_single_file(base_dir, area)
     except Exception:
         return float('nan'), 'データ不足', 'データ不足'
     if df_dr.empty:
@@ -3302,7 +3302,7 @@ def render_map_mode():
             # 10m水温（DR）も添える（常にArea.csv）（※コメントは値がある場合のみ）
                 cur_t = prev_t = prevY_t = np.nan
                 try:
-                    df_dr = load_dr_single_file(base_dir, f"{area}.csv")
+                    df_dr = load_dr_single_file(base_dir, area)
                 except Exception:
                     df_dr = pd.DataFrame()
                 if not df_dr.empty:
