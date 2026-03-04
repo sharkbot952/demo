@@ -3156,6 +3156,21 @@ def render_map_mode():
 
     m = folium.Map(location=[center_lat, center_lon], zoom_start=8)
 
+    # --- 表示対象（areas_with_data があればそれだけ、無ければ全エリア）から bounds を作る ---
+    df_bounds = df_area[df_area['Area'].isin(areas_with_data)].copy() if areas_with_data else df_area.copy()
+    df_bounds = df_bounds.dropna(subset=['Laf', 'Lof'])
+
+    if not df_bounds.empty:
+        min_lat, max_lat = float(df_bounds['Laf'].min()), float(df_bounds['Laf'].max())
+        min_lon, max_lon = float(df_bounds['Lof'].min()), float(df_bounds['Lof'].max())
+
+    # 緯度経度が同一点（1地点のみ）の場合にも対応：少しだけ余白を付ける
+        pad_lat = max(0.02, (max_lat - min_lat) * 0.10)
+        pad_lon = max(0.02, (max_lon - min_lon) * 0.10)
+
+        m.fit_bounds([[min_lat - pad_lat, min_lon - pad_lon],
+                      [max_lat + pad_lat, max_lon + pad_lon]])
+
     # 円グラフ色と凡例
     colors_gsi    = ['#d62728', '#ff7f0e', '#1f77b4']  # ≥25 / 20–24.9 / <20
     colors_larvae = ['#1f77b4', '#ff7f0e', '#d62728']  # <200 / 200–259 / ≥260
