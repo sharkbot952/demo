@@ -1457,8 +1457,12 @@ def render_yearly_compare_mode():
             )
 
             # 最近傍マッチ（同一 Area × Drop_Date_dt 内で Monitoring_Date_dt 最近傍）
-            df_plot = df_plot.sort_values(["Area", "Drop_Date_dt", "Monitoring_Date_dt"]).copy()
-            shell_daily = shell_daily.sort_values(["Area", "Drop_Date_dt", "Monitoring_Date_dt"]).copy()
+            df_plot = df_plot.dropna(subset=["Area", "Drop_Date_dt", "Monitoring_Date_dt"]).copy()
+            df_plot["Monitoring_Date_dt"] = pd.to_datetime(df_plot["Monitoring_Date_dt"], errors="coerce")
+            df_plot = df_plot.sort_values(["Monitoring_Date_dt", "Area", "Drop_Date_dt"]).reset_index(drop=True).copy()
+            shell_daily = shell_daily.dropna(subset=["Area", "Drop_Date_dt", "Monitoring_Date_dt"]).copy()
+            shell_daily["Monitoring_Date_dt"] = pd.to_datetime(shell_daily["Monitoring_Date_dt"], errors="coerce")
+            shell_daily = shell_daily.sort_values(["Monitoring_Date_dt", "Area", "Drop_Date_dt"]).reset_index(drop=True).copy()
 
             df_plot = pd.merge_asof(
                 df_plot,
