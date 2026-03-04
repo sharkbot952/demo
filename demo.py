@@ -1575,7 +1575,7 @@ def render_yearly_compare_mode():
         ys = g["Y_total"].astype(float).values
         if len(xs) >= 2:
             arrow_fracs =[0.33,0.66]
-	    ax_list, ay_list, ang_list = [],[],[]
+            ax_list, ay_list, ang_list = [],[],[]
             for i in range(len(xs) - 1):
                 dx = xs[i + 1] - xs[i]
                 dy = ys[i + 1] - ys[i]
