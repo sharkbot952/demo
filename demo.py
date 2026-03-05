@@ -1304,7 +1304,7 @@ def render_yearly_compare_mode():
     from datetime import datetime, timedelta
     import plotly.express as px
 
-    # --- データ読み込み ---
+    # --- データの読み込み ---
     df_l = read_csv_path(LARVAE_PATH, fp=file_fingerprint(LARVAE_PATH))
     df_c = read_csv_path(COLLECTOR_NUMBER_PATH, fp=file_fingerprint(COLLECTOR_NUMBER_PATH))
     COLLECTOR_SIZE_PATH = pjoin(base_dir, "collector_size.csv")
@@ -1312,77 +1312,71 @@ def render_yearly_compare_mode():
 
     if df_l is None or df_c is None: st.stop()
 
-    # --- 1. ラーバ日別データの整備 ---
+    # --- 1. データ整備 (ラーバ、付着数、殻長) ---
+    # ラーバ計算用
     df_l = df_l.copy()
-    df_l["Date"] = pd.to_datetime(df_l.get("Date"), errors="coerce")
-    df_l["Area"] = df_l.get("Area", "").astype(str).str.strip()
+    df_l["Date"] = pd.to_datetime(df_l["Date"], errors="coerce")
     size_cols = [c for c in df_l.columns if str(c).isdigit()]
     large_cols = [c for c in size_cols if int(c) >= 250]
     df_l["X_large_day"] = df_l[large_cols].sum(axis=1, numeric_only=True).fillna(0)
     larv_map = df_l.groupby(["Area", df_l["Date"].dt.date])["X_large_day"].sum().to_dict()
 
-    # --- 2. 付着数データの集計 ---
+    # 付着数計算用
     df_c = df_c.copy()
-    df_c["Drop_Date"] = pd.to_datetime(df_c.get("Drop_Date"), errors="coerce")
-    df_c["Monitoring_Date"] = pd.to_datetime(df_c.get("Monitoring_Date"), errors="coerce")
-    df_c["Scallop"] = pd.to_numeric(df_c.get("Scallop"), errors="coerce")
-    df_c["Area"] = df_c.get("Area", "Unknown").astype(str).str.strip()
-    df_e = df_c.dropna(subset=["Drop_Date", "Monitoring_Date", "Scallop", "Area"]).copy()
+    for c in ["Drop_Date", "Monitoring_Date"]: df_c[c] = pd.to_datetime(df_c[c], errors="coerce")
+    df_c["Scallop"] = pd.to_numeric(df_c["Scallop"], errors="coerce")
+    df_e = df_c.dropna(subset=["Drop_Date", "Monitoring_Date", "Scallop"]).copy()
     df_e = df_e.groupby(["Area", "Drop_Date", "Monitoring_Date"], as_index=False)["Scallop"].mean()
-    df_e["Year_str"] = df_e["Drop_Date"].dt.year.astype(str)
     df_e["Elapsed_Days"] = (df_e["Monitoring_Date"] - df_e["Drop_Date"]).dt.days
+    df_e["Year"] = df_e["Drop_Date"].dt.year.astype(str)
 
-    # --- 3. 殻長データの集計（平均・最小・最大） ---
+    # 殻長計算用 (平均、最小、最大)
     df_s_agg = pd.DataFrame()
     if df_s is not None and not df_s.empty:
         df_s = df_s.copy()
         shell_col = next((c for c in df_s.columns if any(k in c.lower() for k in ["shell", "殻長"])), None)
         if shell_col:
-            df_s["Drop_Date"] = pd.to_datetime(df_s["Drop_Date"], errors="coerce")
-            df_s["Monitoring_Date"] = pd.to_datetime(df_s["Monitoring_Date"], errors="coerce")
-            df_s["Area"] = df_s["Area"].astype(str).str.strip()
-            df_s["shell_val"] = pd.to_numeric(df_s[shell_col], errors="coerce")
-            # 平均・最小・最大を一気に計算
-            df_s_agg = df_s.dropna(subset=["Drop_Date", "Monitoring_Date", "shell_val"]).copy()
+            for c in ["Drop_Date", "Monitoring_Date"]: df_s[c] = pd.to_datetime(df_s[c], errors="coerce")
+            df_s["val"] = pd.to_numeric(df_s[shell_col], errors="coerce")
+            df_s_agg = df_s.dropna(subset=["Drop_Date", "Monitoring_Date", "val"]).copy()
             df_s_agg = df_s_agg.groupby(["Area", "Drop_Date", "Monitoring_Date"], as_index=False).agg(
-                mean_s=("shell_val", "mean"),
-                min_s=("shell_val", "min"),
-                max_s=("shell_val", "max")
+                mean_s=("val", "mean"), min_s=("val", "min"), max_s=("val", "max")
             )
 
-    # --- 4. UI ---
-    st.subheader("経過日数解析：付着数と成長のバラツキ帯表示")
-    all_years = sorted(df_e["Year_str"].unique(), reverse=True)
+    # --- 2. UI ---
+    st.subheader("経過日数解析：エラーバーによる成長バラツキ比較")
+    all_years = sorted(df_e["Year"].unique(), reverse=True)
     c1, c2 = st.columns([1, 2])
-    with c1:
-        area_sel = st.selectbox("エリア選択", sorted(df_e["Area"].unique()))
-    with c2:
-        display_years = st.multiselect("表示年", all_years, default=all_years[:2])
+    area_sel = c1.selectbox("エリア選択", sorted(df_e["Area"].unique()))
+    display_years = c2.multiselect("表示年", all_years, default=all_years[:2])
 
-    df_filtered = df_e[(df_e["Area"] == area_sel) & (df_e["Year_str"].isin(display_years))].copy()
+    df_filtered = df_e[(df_e["Area"] == area_sel) & (df_e["Year"].isin(display_years))].copy()
 
-    # --- 5. グラフ ---
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
-                        subplot_titles=("経過日数 vs 平均付着数 (点は累積ラーバ量)", "経過日数 vs 平均殻長 (帯：最小〜最大値)"))
+    # --- 3. グラフ構築 ---
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.12,
+                        subplot_titles=("経過日数 vs 平均付着数 (色は累積ラーバ)", "経過日数 vs 殻長 (上下のヒゲ：最小〜最大)"))
 
-    y_colors = px.colors.qualitative.D3
-    e_colors = px.colors.qualitative.Pastel
-    symbol_list = ["circle", "diamond", "square", "triangle-up", "star"]
+    y_palette = px.colors.qualitative.D3
+    e_palette = px.colors.qualitative.Pastel
+    symbols = ["circle", "diamond", "square", "triangle-up", "star"]
     
     unique_drops = sorted(df_filtered["Drop_Date"].unique())
-    drop_edge_map = {d: e_colors[i % len(e_colors)] for i, d in enumerate(unique_drops)}
+    drop_edge_map = {d: e_palette[i % len(e_palette)] for i, d in enumerate(unique_drops)}
+
+    # カラーバーを1回だけ表示するためのフラグ
+    colorbar_shown = False
 
     for i, yr in enumerate(sorted(display_years, reverse=True)):
-        df_yr = df_filtered[df_filtered["Year_str"] == yr]
-        yr_col = y_colors[i % len(y_colors)]
-        yr_sym = symbol_list[i % len(symbol_list)]
+        df_yr = df_filtered[df_filtered["Year"] == yr]
+        yr_col = y_palette[i % len(y_palette)]
+        yr_sym = symbols[i % len(symbols)]
 
         for d_date, group in df_yr.groupby("Drop_Date"):
             group = group.sort_values("Elapsed_Days")
             edge_col = drop_edge_map[d_date]
             label = f"{yr}年 {d_date.strftime('%m/%d')}投入"
 
-            # ラーバ累積計算
+            # 累積ラーバ計算
             acc_larvae = [sum(larv_map.get((area_sel, d.date()), 0) for d in pd.date_range(start=d_date, end=m)) for m in group["Monitoring_Date"]]
 
             # --- 上段: 付着数 ---
@@ -1391,48 +1385,44 @@ def render_yearly_compare_mode():
                 y=[0] + group["Scallop"].tolist(),
                 mode="lines+markers",
                 name=label, legendgroup=label,
-                line=dict(color=yr_col, width=1.2, dash="dot"),
+                line=dict(color=yr_col, width=1, dash="dot"),
                 marker=dict(
                     symbol=yr_sym, size=10,
                     color=[0] + acc_larvae, colorscale="Viridis",
-                    showscale=(i == 0),
+                    showscale=not colorbar_shown, # 最初の1回だけ出す
                     line=dict(width=2, color=edge_col),
-                    colorbar=dict(title="Larvae", x=1.02, thickness=15) if i == 0 else None
+                    colorbar=dict(title="LarvaeSum", x=1.02, thickness=15, len=0.45, y=0.78) if not colorbar_shown else None
                 )
             ), row=1, col=1)
+            if not colorbar_shown: colorbar_shown = True
 
-            # --- 下段: 殻長 (帯 + 平均線) ---
+            # --- 下段: 殻長 (エラーバー付き) ---
             if not df_s_agg.empty:
                 s_group = df_s_agg[(df_s_agg["Area"] == area_sel) & (df_s_agg["Drop_Date"] == d_date)].sort_values("Monitoring_Date")
                 if not s_group.empty:
-                    s_group["Elapsed"] = (s_group["Monitoring_Date"] - s_group["Drop_Date"]).dt.days
-                    
-                    # 成長のバラツキ帯（最小〜最大）
-                    fig.add_trace(go.Scatter(
-                        x=pd.concat([s_group["Elapsed"], s_group["Elapsed"][::-1]]),
-                        y=pd.concat([s_group["max_s"], s_group["min_s"][::-1]]),
-                        fill='toself',
-                        fillcolor=yr_col, # 透明度は下で指定
-                        opacity=0.2,
-                        line=dict(color='rgba(255,255,255,0)'),
-                        hoverinfo="skip",
-                        showlegend=False,
-                        legendgroup=label
-                    ), row=2, col=1)
-
-                    # 平均線
+                    s_group["Elapsed"] = (s_group["Monitoring_Date"] - d_date).dt.days
                     fig.add_trace(go.Scatter(
                         x=s_group["Elapsed"], y=s_group["mean_s"],
                         mode="lines+markers",
                         name=label, legendgroup=label, showlegend=False,
-                        line=dict(color=yr_col, width=3),
-                        marker=dict(symbol=yr_sym, size=8, color=yr_col, line=dict(width=2, color=edge_col))
+                        line=dict(color=yr_col, width=2.5),
+                        marker=dict(symbol=yr_sym, size=8, color=yr_col, line=dict(width=2, color=edge_col)),
+                        error_y=dict(
+                            type='data',
+                            symmetric=False,
+                            array=s_group["max_s"] - s_group["mean_s"],
+                            arrayminus=s_group["mean_s"] - s_group["min_s"],
+                            visible=True,
+                            thickness=1.5,
+                            width=4, # ヒゲの横幅
+                            color=yr_col
+                        )
                     ), row=2, col=1)
 
     fig.update_layout(height=800, template="plotly_white", hovermode="x unified")
     fig.update_yaxes(title_text="付着数(平均)", row=1, col=1)
     fig.update_yaxes(title_text="殻長(mm)", range=[0, 5], row=2, col=1)
-    fig.update_xaxes(title_text="経過日数", row=2, col=1)
+    fig.update_xaxes(title_text="投入日からの経過日数", row=2, col=1)
 
     st.plotly_chart(fig, use_container_width=True)
 
