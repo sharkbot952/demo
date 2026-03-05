@@ -1633,6 +1633,9 @@ OUTLIER_TH_OBS = 2.0      # 観測あり時: corr - obs の閾値
 PHYS_MIN, PHYS_MAX = -1.5, 35.0
 
 def get_arrow_svg(direction_deg, speed_mps):
+    HLR = globals().get('HEAD_LENGTH_RATIO', 0.55)
+    HHR = globals().get('HEAD_HALF_HEIGHT_RATIO', 0.35)
+    SW  = globals().get('SHAFT_WIDTH_PX', 4.0)
     if pd.isna(speed_mps) or pd.isna(direction_deg):
         return ""
     css_angle = (direction_deg - 90) % 360
@@ -1643,13 +1646,13 @@ def get_arrow_svg(direction_deg, speed_mps):
         elif speed_kt < 2.0: return 22, "#FFC107"
         else: return 26, "#FF0000"
     size, color = _style(speed_mps)
-    head_length = size * HEAD_LENGTH_RATIO
-    head_half_h = size * HEAD_HALF_HEIGHT_RATIO
+    head_length = size * HLR
+    head_half_h = size * HHR
     line_end = size - head_length
     return f"""
 <svg width="{size}" height="{size}" style="display:block;margin:0 auto;transform:rotate({css_angle}deg);">
   <line x1="4" y1="{size/2}" x2="{line_end}" y2="{size/2}"
-        stroke="{color}" stroke-width="{SHAFT_WIDTH_PX}" stroke-linecap="round"/>
+        stroke="{color}" stroke-width="{globals().get('SHAFT_WIDTH_PX', 4.0)}" stroke-linecap="round"/>
   <polygon points="{line_end},{size/2 - head_half_h} {size},{size/2} {line_end},{size/2 + head_half_h}"
            fill="{color}"/>
 </svg>
@@ -2298,6 +2301,9 @@ def inject_compact_css():
     """
     st_html(compact_css, height=0)
 def get_arrow_svg(direction_deg, speed_mps):
+    HLR = globals().get('HEAD_LENGTH_RATIO', 0.55)
+    HHR = globals().get('HEAD_HALF_HEIGHT_RATIO', 0.35)
+    SW  = globals().get('SHAFT_WIDTH_PX', 4.0)
     if pd.isna(speed_mps) or pd.isna(direction_deg):
         return ""
     css_angle = (direction_deg - 90) % 360
@@ -2308,13 +2314,13 @@ def get_arrow_svg(direction_deg, speed_mps):
         elif speed_kt < 2.0: return 22, "#FFC107"
         else: return 26, "#FF0000"
     size, color = _style(speed_mps)
-    head_length = size * HEAD_LENGTH_RATIO
-    head_half_h = size * HEAD_HALF_HEIGHT_RATIO
+    head_length = size * HLR
+    head_half_h = size * HHR
     line_end = size - head_length
     return f"""
 <svg width="{size}" height="{size}" style="display:block;margin:0 auto;transform:rotate({css_angle}deg);">
   <line x1="4" y1="{size/2}" x2="{line_end}" y2="{size/2}"
-        stroke="{color}" stroke-width="{SHAFT_WIDTH_PX}" stroke-linecap="round"/>
+        stroke="{color}" stroke-width="{globals().get('SHAFT_WIDTH_PX', 4.0)}" stroke-linecap="round"/>
   <polygon points="{line_end},{size/2 - head_half_h} {size},{size/2} {line_end},{size/2 + head_half_h}"
            fill="{color}"/>
 </svg>
