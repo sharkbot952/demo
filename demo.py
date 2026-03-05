@@ -1312,7 +1312,7 @@ def render_yearly_compare_mode():
 
     if df_l is None or df_c is None: st.stop()
 
-    # --- 1. データの統合 ---
+    # --- 1. データの統合プロセス ---
     df_c = df_c.copy()
     for col in ["Drop_Date", "Monitoring_Date"]:
         df_c[col] = pd.to_datetime(df_c.get(col), errors="coerce")
@@ -1321,7 +1321,7 @@ def render_yearly_compare_mode():
     df_e["Scallop"] = pd.to_numeric(df_e["Scallop"], errors="coerce").fillna(0)
     df_e = df_e.groupby(["Area", "Drop_Date", "Monitoring_Date"], as_index=False).agg({"Scallop": "mean"})
 
-    # ラーバ計算
+    # ラーバ計算用
     df_l = df_l.copy()
     df_l["Date"] = pd.to_datetime(df_l.get("Date"), errors="coerce")
     size_cols = [c for c in df_l.columns if str(c).isdigit()]
@@ -1349,33 +1349,33 @@ def render_yearly_compare_mode():
     df_e["Year_str"] = df_e["Drop_Date"].dt.year.astype(str)
 
     # --- 2. フィルタ設定 ---
-    st.subheader("経過日数ベース解析：付着数と成長の独立比較")
+    st.subheader("経過日数ベース解析：付着数・成長プロセスの比較")
     all_years = sorted(df_e["Year_str"].unique(), reverse=True)
     c1, c2 = st.columns([1, 2])
     with c1:
         area_sel = st.selectbox("エリア選択", sorted(df_e["Area"].unique()))
     with c2:
-        display_years = st.multiselect("表示年", all_years, default=all_years[:2])
+        # デフォルトは最新2年
+        display_years = st.multiselect("表示年を選択", all_years, default=all_years[:2])
 
     df_p = df_e[(df_e["Area"] == area_sel) & (df_e["Year_str"].isin(display_years))].copy()
 
-    # --- 3. グラフ作成 ---
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.12,
-                        subplot_titles=("経過日数 vs 平均付着数（点の色：累積ラーバ）", "経過日数 vs 殻長 (mm)"))
+    # --- 3. 2段グラフ構築 ---
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
+                        subplot_titles=("経過日数 vs 平均付着数 (色はラーバ累積)", "経過日数 vs 殻長 (mm)"))
 
-    # 年別設定（重複しないシンボルと色）
+    # ユニークな設定の割り当て
     symbol_list = ["circle", "diamond", "square", "triangle-up", "star", "hexagram", "cross"]
-    color_palette = px.colors.qualitative.Bold
+    color_palette = px.colors.qualitative.D3 # 視認性の高い配色
     year_map = {y: {"color": color_palette[i % len(color_palette)], "symbol": symbol_list[i % len(symbol_list)]} 
                 for i, y in enumerate(sorted(display_years))}
 
     for (yr, d_date), group in df_p.groupby(["Year_str", "Drop_Date"]):
         group = group.sort_values("Elapsed_Days")
         conf = year_map[yr]
-        drop_label = d_date.strftime('%m/%d')
-        label = f"{yr}年 {drop_label}投入"
+        label = f"{yr}年 {d_date.strftime('%m/%d')}投入"
         
-        # --- 上段: 付着数（ラーバとの相関確認用） ---
+        # --- 上段: 付着数（細点線 + ラーバ色） ---
         fig.add_trace(go.Scatter(
             x=[0] + group["Elapsed_Days"].tolist(),
             y=[0] + group["Scallop"].tolist(),
@@ -1383,27 +1383,27 @@ def render_yearly_compare_mode():
             name=label, legendgroup=label,
             line=dict(color=conf["color"], width=1, dash="dot"),
             marker=dict(
-                symbol=conf["symbol"], size=9,
+                symbol=conf["symbol"], size=10,
                 color=[0] + group["X_sum"].tolist(),
                 colorscale="Viridis",
                 showscale=(yr == max(display_years)),
-                colorbar=dict(title="LarvaeSum", thickness=15, x=1.02, y=0.78, len=0.45) if (yr == max(display_years)) else None
+                colorbar=dict(title="LarvaeSum", thickness=15, x=1.02, y=0.75, len=0.4) if (yr == max(display_years)) else None
             ),
             hovertemplate="経過: %{x}日<br>付着: %{y:.1f}<br>ラーバ累積: %{marker.color:.0f}<extra></extra>"
         ), row=1, col=1)
 
-        # --- 下段: 殻長（成長スピード純粋比較） ---
+        # --- 下段: 殻長（太実線 + 年別固定色） ---
         df_s_plot = group.dropna(subset=["shell_filled"])
         fig.add_trace(go.Scatter(
             x=df_s_plot["Elapsed_Days"],
             y=df_s_plot["shell_filled"],
             mode="lines+markers",
             name=label, legendgroup=label, showlegend=False,
-            line=dict(color=conf["color"], width=3), # 成長曲線は太く
+            line=dict(color=conf["color"], width=3),
             marker=dict(
                 symbol=conf["symbol"], 
-                size=df_s_plot["shell_filled"].apply(lambda s: 10 + (s**1.5)*5), # 0.1-4mmを強調
-                color=conf["color"], # 殻長グラフは年ごとの色で統一（ラーバ色は出さない）
+                size=df_s_plot["shell_filled"].apply(lambda s: 10 + (s**1.4)*6), # 0.1-4mm強調
+                color=conf["color"],
                 line=dict(width=1, color="white")
             ),
             hovertemplate="経過: %{x}日<br>殻長: %{y:.2f} mm<extra></extra>"
