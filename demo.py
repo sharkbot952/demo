@@ -1432,21 +1432,23 @@ def render_yearly_compare_mode():
                         hovertemplate="殻長:%{y:.2f}mm<extra></extra>"
                     ), row=2, col=1)
 
-    # ★【修正3】レイアウト設定（見切れ・凡例の水平化を強化）
     fig.update_layout(
         height=850,
-        margin=dict(t=100, b=150, r=30, l=90), # 左余白を広げて見切れ防止、下余白を広げてバーを収める
+        margin=dict(t=100, b=150, r=30, l=90), 
         template="plotly_white",
         hovermode="x unified",
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=1.03,         # グラフの直上
-            xanchor="left", # 左詰めにすることでスマホでも並びやすくする
+            y=1.03,
+            xanchor="left",
             x=0,
             font=dict(size=11),
             traceorder="normal",
-            itemclick="toggleothers" # クリックした要素以外を非表示にする（便利機能）
+            # itemclick="toggleothers" を削除し、標準挙動に戻す
+            # これで「クリックした日付だけ」が消えたり点いたりします
+            itemclick="toggle", 
+            itemdoubleclick="showothers" # ダブルクリックでそれ以外を表示
         )
     )
     
