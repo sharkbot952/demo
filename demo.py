@@ -1352,7 +1352,6 @@ def render_yearly_compare_mode():
             )
 
     # --- 5. UI ---
-    st.subheader("経過日数解析：成長プロセスの詳細比較")
     all_years = sorted(df_e["Year"].unique(), reverse=True)
     c1, c2 = st.columns([1, 2])
     area_sel = c1.selectbox("エリア選択", sorted(df_e["Area"].unique()))
@@ -1362,7 +1361,7 @@ def render_yearly_compare_mode():
 
     # --- 6. グラフ ---
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
-                        subplot_titles=("経過日数 vs 平均付着数", "経過日数 vs 平均殻長 (ヒゲ：最小〜最大)"))
+                        subplot_titles=("経過日数 vs 平均付着数", "経過日数 vs 平均殻長"))
 
     y_palette = px.colors.qualitative.D3
     e_palette = px.colors.qualitative.Pastel
