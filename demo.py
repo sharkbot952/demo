@@ -1304,7 +1304,7 @@ def render_yearly_compare_mode():
     from datetime import datetime, timedelta
     import plotly.express as px
 
-    # --- データ読み込み ---
+    # --- データの読み込み ---
     df_l = read_csv_path(LARVAE_PATH, fp=file_fingerprint(LARVAE_PATH))
     df_c = read_csv_path(COLLECTOR_NUMBER_PATH, fp=file_fingerprint(COLLECTOR_NUMBER_PATH))
     COLLECTOR_SIZE_PATH = pjoin(base_dir, "collector_size.csv")
@@ -1312,47 +1312,46 @@ def render_yearly_compare_mode():
 
     if df_l is None or df_c is None: st.stop()
 
-    # --- 1. 前処理: 付着数データ ---
+    # --- 1. ラーバ日別データの整備 ---
+    df_l = df_l.copy()
+    df_l["Date"] = pd.to_datetime(df_l.get("Date"), errors="coerce")
+    df_l["Area"] = df_l.get("Area", "").astype(str).str.strip()
+    size_cols = [c for c in df_l.columns if str(c).isdigit()]
+    large_cols = [c for c in size_cols if int(c) >= 250]
+    df_l["X_large_day"] = df_l[large_cols].sum(axis=1, numeric_only=True).fillna(0)
+    
+    # エリア×日付ごとのラーバ発生量マップ
+    larv_map = df_l.set_index(["Area", df_l["Date"].dt.date])["X_large_day"].to_dict()
+
+    # --- 2. 付着数データの整備 ---
     df_c = df_c.copy()
     df_c["Drop_Date"] = pd.to_datetime(df_c.get("Drop_Date"), errors="coerce")
     df_c["Monitoring_Date"] = pd.to_datetime(df_c.get("Monitoring_Date"), errors="coerce")
     df_c["Scallop"] = pd.to_numeric(df_c.get("Scallop"), errors="coerce")
+    df_c["Area"] = df_c.get("Area", "Unknown").astype(str).str.strip()
     
-    # 欠損排除と集計
-    df_e = df_c.dropna(subset=["Drop_Date", "Monitoring_Date", "Scallop"]).copy()
-    df_e["Area"] = df_e.get("Area", "Unknown").astype(str).str.strip()
-    # 同一エリア・同一投入日・同一回収日の平均を算出
+    # 有効なデータのみ抽出
+    df_e = df_c.dropna(subset=["Drop_Date", "Monitoring_Date", "Scallop", "Area"]).copy()
+    
+    # エリア・投入日・回収日ごとに平均を算出（実態に忠実な集計）
     df_e = df_e.groupby(["Area", "Drop_Date", "Monitoring_Date"], as_index=False)["Scallop"].mean()
-
-    # ラーバ計算用辞書
-    df_l = df_l.copy()
-    df_l["Date"] = pd.to_datetime(df_l.get("Date"), errors="coerce")
-    size_cols = [c for c in df_l.columns if str(c).isdigit()]
-    large_cols = [c for c in size_cols if int(c) >= 250]
-    df_l["X_large_day"] = df_l[large_cols].sum(axis=1, numeric_only=True) if large_cols else 0.0
-    larv_dict = df_l.groupby(["Area", df_l["Date"].dt.date])["X_large_day"].sum().to_dict()
-
-    # 指標計算
-    def _calc_metrics(row):
-        area = row["Area"]
-        d_start, d_end = row["Drop_Date"].date(), row["Monitoring_Date"].date()
-        x_sum = sum(larv_dict.get((area, d_start + timedelta(days=i)), 0) for i in range(max(0, (d_end - d_start).days)))
-        s_val = np.nan
-        if df_s is not None and not df_s.empty:
-            shell_col = next((c for c in df_s.columns if any(k in c.lower() for k in ["shell", "殻長"])), None)
-            if shell_col:
-                s_mask = (df_s["Area"].astype(str).str.strip() == area) & \
-                         (pd.to_datetime(df_s["Drop_Date"]).dt.date == d_start) & \
-                         (pd.to_datetime(df_s["Monitoring_Date"]).dt.date == d_end)
-                s_val = pd.to_numeric(df_s.loc[s_mask, shell_col], errors='coerce').mean()
-        return pd.Series([x_sum, s_val])
-
-    df_e[["X_sum", "shell_raw"]] = df_e.apply(_calc_metrics, axis=1)
-    df_e["Elapsed_Days"] = (df_e["Monitoring_Date"] - df_e["Drop_Date"]).dt.days
     df_e["Year_str"] = df_e["Drop_Date"].dt.year.astype(str)
+    df_e["Elapsed_Days"] = (df_e["Monitoring_Date"] - df_e["Drop_Date"]).dt.days
 
-    # --- 2. UI設定 ---
-    st.subheader("経過日数解析：付着と成長（投入日別カラーエッジ）")
+    # --- 3. 殻長データの整備 ---
+    df_s_processed = pd.DataFrame()
+    if df_s is not None and not df_s.empty:
+        df_s = df_s.copy()
+        shell_col = next((c for c in df_s.columns if any(k in c.lower() for k in ["shell", "殻長"])), None)
+        if shell_col:
+            df_s["Drop_Date"] = pd.to_datetime(df_s["Drop_Date"], errors="coerce")
+            df_s["Monitoring_Date"] = pd.to_datetime(df_s["Monitoring_Date"], errors="coerce")
+            df_s["Area"] = df_s["Area"].astype(str).str.strip()
+            df_s["shell_val"] = pd.to_numeric(df_s[shell_col], errors="coerce")
+            df_s_processed = df_s.dropna(subset=["Drop_Date", "Monitoring_Date", "shell_val"])
+
+    # --- 4. UI/フィルタ ---
+    st.subheader("経過日数解析：付着と成長（累積ラーバ計算修正版）")
     all_years = sorted(df_e["Year_str"].unique(), reverse=True)
     c1, c2 = st.columns([1, 2])
     with c1:
@@ -1360,30 +1359,38 @@ def render_yearly_compare_mode():
     with c2:
         display_years = st.multiselect("表示年", all_years, default=all_years[:2])
 
-    df_p = df_e[(df_e["Area"] == area_sel) & (df_e["Year_str"].isin(display_years))].copy()
+    df_filtered = df_e[(df_e["Area"] == area_sel) & (df_e["Year_str"].isin(display_years))].copy()
 
-    # --- 3. グラフ作成 ---
+    # --- 5. グラフ作成 ---
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
                         subplot_titles=("経過日数 vs 平均付着数 (点は累積ラーバ量)", "経過日数 vs 殻長 (mm)"))
 
-    # 配色設定
-    year_colors = px.colors.qualitative.Set1 # 年ごとの塗り
-    drop_edge_colors = px.colors.qualitative.Pastel # 投入日ごとの縁取り
+    # 配色・デザイン設定
+    y_colors = px.colors.qualitative.D3
+    e_colors = px.colors.qualitative.Pastel
     symbol_list = ["circle", "diamond", "square", "triangle-up", "star"]
+    
+    # 投入日ごとのエッジカラーマップ作成
+    unique_drops = sorted(df_filtered["Drop_Date"].unique())
+    drop_edge_map = {d: e_colors[i % len(e_colors)] for i, d in enumerate(unique_drops)}
 
-    # 投入日のユニークリスト（縁取り用）
-    unique_drops = sorted(df_p["Drop_Date"].unique())
-    drop_color_map = {d: drop_edge_colors[i % len(drop_edge_colors)] for i, d in enumerate(unique_drops)}
-
-    for i, yr in enumerate(sorted(display_years)):
-        df_yr = df_p[df_p["Year_str"] == yr]
-        y_color = year_colors[i % len(year_colors)]
-        y_symbol = symbol_list[i % len(symbol_list)]
+    for i, yr in enumerate(sorted(display_years, reverse=True)):
+        df_yr = df_filtered[df_filtered["Year_str"] == yr]
+        yr_col = y_colors[i % len(y_colors)]
+        yr_sym = symbol_list[i % len(symbol_list)]
 
         for d_date, group in df_yr.groupby("Drop_Date"):
             group = group.sort_values("Elapsed_Days")
-            edge_color = drop_color_map[d_date]
+            edge_col = drop_edge_map[d_date]
             label = f"{yr}年 {d_date.strftime('%m/%d')}投入"
+
+            # 正確な累積ラーバ計算
+            acc_larvae = []
+            for m_date in group["Monitoring_Date"]:
+                # 投入日からその回収日までの期間の合計
+                d_range = pd.date_range(start=d_date, end=m_date)
+                v_sum = sum(larv_map.get((area_sel, d.date()), 0) for d in d_range)
+                acc_larvae.append(v_sum)
 
             # --- 上段: 付着数 ---
             fig.add_trace(go.Scatter(
@@ -1391,38 +1398,44 @@ def render_yearly_compare_mode():
                 y=[0] + group["Scallop"].tolist(),
                 mode="lines+markers",
                 name=label, legendgroup=label,
-                line=dict(color=y_color, width=1, dash="dot"),
+                line=dict(color=yr_col, width=1.2, dash="dot"),
                 marker=dict(
-                    symbol=y_symbol, size=11,
-                    color=group["X_sum"].tolist() + [0], # 累積ラーバ量で色付け
+                    symbol=yr_sym, size=11,
+                    color=[0] + acc_larvae,
                     colorscale="Viridis",
                     showscale=(i == 0),
-                    line=dict(width=2, color=edge_color), # 投入日別の縁取り
-                    colorbar=dict(title="Larvae", x=1.02, thickness=15) if i == 0 else None
-                )
+                    line=dict(width=2, color=edge_col), # 投入日をエッジカラーで識別
+                    colorbar=dict(title="LarvaeSum", x=1.02, thickness=15) if i == 0 else None
+                ),
+                hovertemplate="経過: %{x}日<br>付着平均: %{y:.1f}<br>累積ラーバ: %{marker.color:,.0f}<extra></extra>"
             ), row=1, col=1)
 
             # --- 下段: 殻長 ---
-            df_s_p = group.dropna(subset=["shell_raw"])
-            fig.add_trace(go.Scatter(
-                x=df_s_p["Elapsed_Days"],
-                y=df_s_p["shell_raw"],
-                mode="lines+markers",
-                name=label, legendgroup=label, showlegend=False,
-                line=dict(color=y_color, width=2.5),
-                marker=dict(
-                    symbol=y_symbol, 
-                    size=df_s_p["shell_raw"].apply(lambda s: 10 + s*8),
-                    color=y_color,
-                    line=dict(width=2, color=edge_color) # 投入日別の縁取り
-                )
-            ), row=2, col=1)
+            if not df_s_processed.empty:
+                s_group = df_s_processed[(df_s_processed["Area"] == area_sel) & 
+                                         (df_s_processed["Drop_Date"] == d_date)].sort_values("Monitoring_Date")
+                if not s_group.empty:
+                    s_group["Elapsed"] = (s_group["Monitoring_Date"] - s_group["Drop_Date"]).dt.days
+                    fig.add_trace(go.Scatter(
+                        x=s_group["Elapsed"],
+                        y=s_group["shell_val"],
+                        mode="lines+markers",
+                        name=label, legendgroup=label, showlegend=False,
+                        line=dict(color=yr_col, width=2.5),
+                        marker=dict(
+                            symbol=yr_sym, 
+                            size=s_group["shell_val"].apply(lambda s: 10 + s*8),
+                            color=yr_col,
+                            line=dict(width=2, color=edge_col)
+                        ),
+                        hovertemplate="経過: %{x}日<br>殻長: %{y:.2f} mm<extra></extra>"
+                    ), row=2, col=1)
 
-    fig.update_layout(height=850, template="plotly_white", hovermode="x unified",
-                      legend=dict(x=1.12, y=1))
+    fig.update_layout(height=850, template="plotly_white", hovermode="x unified", legend=dict(x=1.15, y=1))
     fig.update_yaxes(title_text="付着数(平均)", row=1, col=1)
     fig.update_yaxes(title_text="殻長(mm)", range=[0, 5], row=2, col=1)
-    
+    fig.update_xaxes(title_text="投入からの経過日数 (Days)", row=2, col=1)
+
     st.plotly_chart(fig, use_container_width=True)
 
 # =========================
