@@ -1308,145 +1308,135 @@ def render_yearly_compare_mode():
     import streamlit as st
     import pandas as pd
     import numpy as np
-    import plotly.express as px
     import plotly.graph_objects as go
+    from datetime import timedelta
 
-    # --- 読み込み ---
+    # --- データの読み込み ---
     df_l = read_csv_path(LARVAE_PATH, fp=file_fingerprint(LARVAE_PATH))
     df_c = read_csv_path(COLLECTOR_NUMBER_PATH, fp=file_fingerprint(COLLECTOR_NUMBER_PATH))
     COLLECTOR_SIZE_PATH = pjoin(base_dir, "collector_size.csv")
     df_s = read_csv_path(COLLECTOR_SIZE_PATH, fp=file_fingerprint(COLLECTOR_SIZE_PATH))
 
-    if df_l is None or df_c is None:
-        st.stop()
-    if df_l.empty or df_c.empty:
-        st.warning("データが不足しています")
-        return
+    if df_l is None or df_c is None: st.stop()
 
-    # ---------- 1. larvaeデータの処理 (エラー対策強化) ----------
+    # --- 1. ラーバ累積データの辞書化 (高速化) ---
     df_l = df_l.copy()
     df_l["Date"] = pd.to_datetime(df_l.get("Date"), errors="coerce")
     df_l["Area"] = df_l.get("Area", "").astype(str).str.strip()
-
-    # 数値列（サイズ列）を特定し、強制的に数値化
     size_cols = [c for c in df_l.columns if str(c).isdigit()]
-    for c in size_cols:
-        df_l[c] = pd.to_numeric(df_l[c], errors="coerce").fillna(0.0)
-
-    # 大型ラーバ(>=250)の累積計算
     large_cols = [c for c in size_cols if int(c) >= 250]
-    # ここでエラーが出ないよう numeric_only を意識
-    df_l["X_large_day"] = df_l[large_cols].sum(axis=1) if large_cols else 0.0
+    df_l["X_large_day"] = df_l[large_cols].sum(axis=1, numeric_only=True) if large_cols else 0.0
+    larv_dict = df_l.groupby(["Area", df_l["Date"].dt.date])["X_large_day"].sum().to_dict()
 
-    df_l = df_l.dropna(subset=["Date", "Area"]).copy()
-    df_l["date_only"] = df_l["Date"].dt.date
-    
-    # エリア×日別で集計
-    larv_by_area_date = df_l.groupby(["Area", "date_only"])["X_large_day"].sum().to_dict()
-
-    # ---------- 2. collector_number (付着数) の整理 ----------
+    # --- 2. 付着数データのクレンジング ---
     df_c = df_c.copy()
-    for col in ["Drop_Date", "Monitoring_Date"]:
-        df_c[col] = pd.to_datetime(df_c.get(col), errors="coerce")
+    for c in ["Drop_Date", "Monitoring_Date"]: df_c[c] = pd.to_datetime(df_c.get(c), errors="coerce")
     df_c["Area"] = df_c.get("Area", "").astype(str).str.strip()
     df_c["Scallop"] = pd.to_numeric(df_c.get("Scallop"), errors="coerce")
+    df_e = df_c.dropna(subset=["Drop_Date", "Monitoring_Date", "Area", "Scallop"]).groupby(
+        ["Area", "Drop_Date", "Monitoring_Date"], as_index=False
+    ).agg({"Scallop": "mean"})
 
-    df_c = df_c.dropna(subset=["Drop_Date", "Monitoring_Date", "Area", "Scallop"]).copy()
-    
-    # エベント単位（Area, Drop, Monitoring）で集約
-    df_e = df_c.groupby(["Area", "Drop_Date", "Monitoring_Date"], as_index=False).agg({
-        "Scallop": "mean"
-    }).rename(columns={"Scallop": "Y_total"})
-
-    # ---------- 3. 累積ラーバ数(X)と殻長(Size)の計算 ----------
-    def _calc_metrics(row):
-        area = row["Area"]
-        d_start = row["Drop_Date"].date()
-        d_end = row["Monitoring_Date"].date()
-        
-        # 期間内の累積ラーバ計算
-        # 高速化のため辞書から取得
-        x_sum = 0.0
-        curr = d_start
-        while curr < d_end:
-            x_sum += larv_by_area_date.get((area, curr), 0.0)
-            curr += timedelta(days=1)
-            
-        # 殻長データの取得 (df_s)
-        shell_val = np.nan
-        if df_s is not None and not df_s.empty:
-            # 殻長のカラム名を検索
+    # --- 3. メトリクス計算（累積ラーバ・殻長補完） ---
+    def _calc(row):
+        area, d_start, d_end = row["Area"], row["Drop_Date"].date(), row["Monitoring_Date"].date()
+        # 期間累積ラーバ
+        x_sum = sum(larv_dict.get((area, d_start + timedelta(days=i)), 0) for i in range((d_end - d_start).days))
+        # 殻長取得
+        s_val = np.nan
+        if df_s is not None:
             shell_col = next((c for c in df_s.columns if "shell" in c.lower() or "殻長" in c), None)
             if shell_col:
-                s_mask = (df_s["Area"].astype(str).str.strip() == area) & \
-                         (pd.to_datetime(df_s["Drop_Date"]).dt.date == d_start) & \
-                         (pd.to_datetime(df_s["Monitoring_Date"]).dt.date == d_end)
-                shell_val = pd.to_numeric(df_s.loc[s_mask, shell_col], errors='coerce').mean()
+                m = (df_s["Area"].astype(str).str.strip() == area) & \
+                    (pd.to_datetime(df_s["Drop_Date"]).dt.date == d_start) & \
+                    (pd.to_datetime(df_s["Monitoring_Date"]).dt.date == d_end)
+                s_val = pd.to_numeric(df_s.loc[m, shell_col], errors='coerce').mean()
+        return pd.Series([x_sum, s_val])
+
+    df_e[["X_total", "shell_raw"]] = df_e.apply(_calc, axis=1)
+    df_e["shell_filled"] = df_e.groupby(["Area", "Drop_Date"])["shell_raw"].transform(lambda x: x.ffill().bfill())
+    
+    # --- 4. グラフ描画（期間を線で表現） ---
+    st.subheader("経年比較：投入〜回収期間のプロセス可視化")
+    
+    areas = sorted(df_e["Area"].unique())
+    area_sel = st.selectbox("エリア", ["ALL"] + areas)
+    df_p = df_e if area_sel == "ALL" else df_e[df_e["Area"] == area_sel]
+
+    fig = go.Figure()
+
+    # 投入年ごとの色分け用
+    years = sorted(df_p["Drop_Date"].dt.year.unique())
+    colors = px.colors.qualitative.Plotly
+
+    for i, year in enumerate(years):
+        df_year = df_p[df_p["Drop_Date"].dt.year == year]
+        color = colors[i % len(colors)]
         
-        return pd.Series([x_sum, shell_val])
+        # 同じエリア・同じ投入日の「一連のプロセス」ごとに線を引く
+        for (area, d_date), group in df_year.groupby(["Area", "Drop_Date"]):
+            group = group.sort_values("Monitoring_Date")
+            
+            # X軸を「2000年」に正規化して時期を比較可能に
+            x_start = d_date.replace(year=2000)
+            x_ends = group["Monitoring_Date"].apply(lambda d: d.replace(year=2000))
+            
+            # 1. 投入点から回収点への線（期間を示す）
+            for _, row in group.iterrows():
+                x_end = row["Monitoring_Date"].replace(year=2000)
+                duration = (row["Monitoring_Date"] - row["Drop_Date"]).days
+                
+                # 線を描画（投入日 -> 回収日）
+                fig.add_trace(go.Scatter(
+                    x=[x_start, x_end],
+                    y=[row["Scallop"], row["Scallop"]], # Y軸は付着数
+                    mode="lines",
+                    line=dict(color=color, width=1, dash="dot"),
+                    showlegend=False,
+                    hoverinfo="skip"
+                ))
 
-    df_e[["X_total", "shell_raw"]] = df_e.apply(_calc_metrics, axis=1)
+            # 2. 回収地点のプロット（サイズ＝殻長、色＝ラーバ累積）
+            fig.add_trace(go.Scatter(
+                x=x_ends,
+                y=group["Y_total"],
+                mode="markers",
+                name=f"{year}年 ({area})",
+                marker=dict(
+                    size=group["shell_filled"].fillna(5).clip(8, 40),
+                    color=group["X_total"],
+                    colorscale="Viridis",
+                    showscale=True if i == 0 else False,
+                    colorbar=dict(title="ラーバ累積", x=1.1),
+                    line=dict(width=1, color="DarkSlateGrey")
+                ),
+                hovertemplate=(
+                    f"<b>{year}年 {area}</b><br>"
+                    "投入: %{customdata[0]}<br>"
+                    "回収: %{customdata[1]}<br>"
+                    "期間: %{customdata[2]}日間<br>"
+                    "付着数: %{y:.1f}<br>"
+                    "ラーバ累積: %{marker.color:.1f}<br>"
+                    "殻長: %{customdata[3]:.1f}mm<br>"
+                    "<extra></extra>"
+                ),
+                customdata=np.stack([
+                    group["Drop_Date"].dt.strftime('%m/%d'),
+                    group["Monitoring_Date"].dt.strftime('%m/%d'),
+                    (group["Monitoring_Date"] - group["Drop_Date"]).dt.days,
+                    group["shell_filled"]
+                ], axis=1)
+            ))
 
-    # ---------- 4. 補完処理と正規化 ----------
-    df_plot = df_e.copy()
-    # 殻長の時系列補完（同一エリア・同一投入日のデータ内）
-    df_plot["shell_filled"] = df_plot.groupby(["Area", "Drop_Date"])["shell_raw"].transform(
-        lambda x: x.ffill().bfill()
+    fig.update_layout(
+        xaxis_title="時期（月日）",
+        yaxis_title="付着数（平均）",
+        xaxis=dict(tickformat="%m/%d"),
+        template="plotly_white",
+        height=700,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     
-    # X軸用の正規化（年を2000年に統一）
-    df_plot["date_norm"] = df_plot["Monitoring_Date"].apply(lambda x: x.replace(year=2000))
-    df_plot["Year"] = df_plot["Drop_Date"].dt.year.astype(str)
-
-    # UI（エリア選択）
-    areas = sorted(df_plot["Area"].unique().tolist())
-    area_sel = st.selectbox("エリア", ["ALL"] + areas, key="yearly_area_sel")
-    if area_sel != "ALL":
-        df_plot = df_plot[df_plot["Area"] == area_sel].copy()
-
-    if df_plot.empty:
-        st.info("表示できるデータがありません")
-        return
-
-    # ---------- 5. 描画 ----------
-    # プロットサイズ用に殻長を調整（最小サイズを保証）
-    min_size = 8
-    max_size = 35
-    s_val = df_plot["shell_filled"].fillna(0)
-    if s_val.max() > s_val.min():
-        df_plot["marker_size"] = min_size + (s_val - s_val.min()) / (s_val.max() - s_val.min()) * (max_size - min_size)
-    else:
-        df_plot["marker_size"] = min_size
-
-    fig = px.scatter(
-        df_plot,
-        x="date_norm",
-        y="Y_total",
-        color="X_total",            # 色：大型ラーバ累積数
-        size="marker_size",         # サイズ：殻長（補完済）
-        symbol="Year",              # 形：年
-        hover_data={
-            "Monitoring_Date": "|%Y-%m-%d",
-            "X_total": ":.2f",
-            "Y_total": ":.1f",
-            "shell_raw": ":.2f",
-            "shell_filled": ":.2f",
-            "date_norm": False,
-            "marker_size": False
-        },
-        labels={
-            "date_norm": "時期 (月日)",
-            "Y_total": "付着数",
-            "X_total": "大型ラーバ累積数",
-            "Year": "年"
-        },
-        color_continuous_scale="Viridis",
-        title="経年比較：時系列付着状況 (サイズ=殻長, 色=ラーバ累積)"
-    )
-
-    fig.update_xaxes(tickformat="%m/%d")
-    fig.update_layout(height=650, template="plotly_white", legend=dict(orientation="h", y=1.1))
-
     st.plotly_chart(fig, use_container_width=True)
 
 # =========================
