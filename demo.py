@@ -1297,11 +1297,6 @@ def render_larvae_mode(selected_areas: Optional[List[str]]):
 # 経年比較モード（大型ラーバ累積 × 付着数 合算）
 # - X: Drop_Date 以降、Monitoring_Date 前までの 大型ラーバ(>=250)累積
 # - Y: Place をまとめた Scallop 合計（Monitoring_Date 時点の累積付着数）
-# - 色: 投入年（Drop_Date の年）※カテゴリ（凡例）
-# - 濃淡: 同一年・同一Areaの DropDate の早遅（早いほど薄い）
-# - 点サイズ: (Monitoring_Date - Drop_Date) の日数
-# - 表示: エリアは選択式（ALL / 1エリア）
-# - 重要: read_csv_path は cache されるため、fp(指紋) を渡してファイル更新を反映
 # =========================
 
 def render_yearly_compare_mode():
@@ -1337,7 +1332,7 @@ def render_yearly_compare_mode():
     df_e["Scallop"] = pd.to_numeric(df_e["Scallop"], errors="coerce")
     df_e = df_e.groupby(["Area", "Drop_Date", "Monitoring_Date"], as_index=False).agg({"Scallop": "mean"})
 
-    # --- 3. メトリクス計算（累積ラーバと殻長近傍マッチ） ---
+    # --- 3. メトリクス計算 ---
     def _calc_metrics(row):
         area = row["Area"]
         d_start, d_end = row["Drop_Date"].date(), row["Monitoring_Date"].date()
@@ -1347,7 +1342,6 @@ def render_yearly_compare_mode():
         if df_s is not None and not df_s.empty:
             shell_col = next((c for c in df_s.columns if any(k in c.lower() for k in ["shell", "殻長"])), None)
             if shell_col:
-                # 許容範囲を少し広めに設定（±5日）
                 s_mask = (df_s["Area"].astype(str).str.strip() == area) & \
                          (pd.to_datetime(df_s["Drop_Date"]).sub(row["Drop_Date"]).dt.days.abs() <= 5) & \
                          (pd.to_datetime(df_s["Monitoring_Date"]).sub(row["Monitoring_Date"]).dt.days.abs() <= 5)
@@ -1359,42 +1353,51 @@ def render_yearly_compare_mode():
 
     # --- 4. 描画設定 ---
     st.subheader("経年比較：成長プロセス軌跡（投入日起点）")
+    
+    # 年列を確定させておく（エラー対策）
+    df_e["Year_str"] = df_e["Drop_Date"].dt.year.astype(str)
+    all_years = sorted(df_e["Year_str"].unique())
+    
     area_sel = st.selectbox("エリア選択", ["ALL"] + sorted(df_e["Area"].unique()))
     df_p = df_e if area_sel == "ALL" else df_e[df_e["Area"] == area_sel].copy()
 
     fig = go.Figure()
-    # 年別の配色とプロット形状（視認性の高いセット）
     year_configs = {
-        "2023": {"color": "#636EFA", "symbol": "circle"},          # 丸
-        "2024": {"color": "#EF553B", "symbol": "diamond"},         # 菱形
-        "2025": {"color": "#00CC96", "symbol": "triangle-up"},     # 三角
-        "2026": {"color": "#AB63FA", "symbol": "square"}           # 四角
+        "2023": {"color": "#636EFA", "symbol": "circle"},
+        "2024": {"color": "#EF553B", "symbol": "diamond"},
+        "2025": {"color": "#00CC96", "symbol": "triangle-up"},
+        "2026": {"color": "#AB63FA", "symbol": "square"}
     }
     seen_years = set()
 
-    for (yr, area, d_date), group in df_p.assign(Year=df_p["Drop_Date"].dt.year.astype(str)).groupby(["Year", "Area", "Drop_Date"]):
+    # --- 殻長強調スケーリング関数 ---
+    # 0.1mm -> 小さい点, 4.0mm -> 大きなプロット
+    def scale_shell(s):
+        if pd.isna(s) or s <= 0: return 6  # 最小サイズ
+        # 0.1mmから4mmまでのわずかな差を面積差として強調する (s^1.5を使用)
+        return 7 + (s ** 1.5) * 8
+
+    # 軌跡を描画
+    for (yr, area, d_date), group in df_p.groupby(["Year_str", "Area", "Drop_Date"]):
         group = group.sort_values("Monitoring_Date")
         conf = year_configs.get(yr, {"color": "#7f7f7f", "symbol": "cross"})
         
         x_start = d_date.replace(year=2000)
         x_ends = group["Monitoring_Date"].apply(lambda d: d.replace(year=2000)).tolist()
         
-        plot_x = [x_start] + x_ends
-        plot_y = [0] + group["Scallop"].tolist()
-        
-        # 1. 軌跡の線
+        # 1. 軌跡の線（投入日 0 から 観測点まで）
         fig.add_trace(go.Scatter(
-            x=plot_x, y=plot_y,
+            x=[x_start] + x_ends, 
+            y=[0] + group["Scallop"].tolist(),
             mode="lines",
-            line=dict(color=conf["color"], width=2.5, dash="dash" if yr != "2025" else "solid"),
+            line=dict(color=conf["color"], width=2.5, dash="dash" if yr != all_years[-1] else "solid"),
             legendgroup=yr, showlegend=False, hoverinfo="skip"
         ))
 
         # 2. 実測プロット
-        # 殻長 0.1mm - 4mm の違いを強調するスケーリング: 最小8px, 4mmで約40px
-        def scale_shell(s):
-            if pd.isna(s) or s <= 0: return 8
-            return 8 + (s ** 1.2) * 8
+        # カラーバーを一つだけ出すための判定
+        is_last_year = (yr == all_years[-1])
+        show_cbar = is_last_year and (yr not in seen_years)
 
         fig.add_trace(go.Scatter(
             x=x_ends, y=group["Scallop"],
@@ -1407,13 +1410,11 @@ def render_yearly_compare_mode():
                 size=group["shell_filled"].apply(scale_shell),
                 color=group["X_sum"],
                 colorscale="Viridis",
-                showscale=(yr == "2025" or (not seen_years and yr == sorted(df_p['Year'].unique())[-1])),
+                showscale=show_cbar,
                 colorbar=dict(
-                    title="Larvae Sum", # 文字化け回避のため英語、またはタイトル指定
-                    x=1.05, 
-                    thickness=15,
-                    titleside="top"
-                ),
+                    title=dict(text="Larvae Sum", font=dict(size=12)), 
+                    x=1.05, thickness=15, titleside="top"
+                ) if show_cbar else None,
                 line=dict(width=1, color="white")
             ),
             customdata=np.stack([
@@ -1427,25 +1428,18 @@ def render_yearly_compare_mode():
                 "<b>%{yr}年 %{customdata[4]}</b><br>"
                 "投入: %{customdata[0]}<br>回収: %{customdata[1]}<br>"
                 "付着数: %{y:.1f} / 殻長: %{customdata[3]} mm<br>"
-                "累積ラーバ: %{customdata[2]}<br><extra></extra>"
+                "ラーバ累積: %{customdata[2]}<br><extra></extra>"
             )
         ))
         seen_years.add(yr)
 
-    # グラフ全体のレイアウト調整
     fig.update_layout(
-        xaxis_title="時期 (Month/Day)", 
-        yaxis_title="付着数平均 (Scallop Mean)",
-        xaxis=dict(
-            tickformat="%m/%d", 
-            range=[datetime(2000, 5, 1), datetime(2000, 8, 31)],
-            gridcolor='lightgrey'
-        ),
-        yaxis=dict(gridcolor='lightgrey'),
-        template="plotly_white", 
-        height=750,
+        xaxis_title="時期 (月/日)", 
+        yaxis_title="付着数（平均）",
+        xaxis=dict(tickformat="%m/%d", range=[datetime(2000, 5, 1), datetime(2000, 8, 31)]),
+        template="plotly_white", height=750,
         legend=dict(orientation="h", y=1.05, x=0),
-        margin=dict(r=120) # カラーバーのスペース確保
+        margin=dict(r=120)
     )
     
     st.plotly_chart(fig, use_container_width=True)
