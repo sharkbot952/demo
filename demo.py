@@ -1304,7 +1304,7 @@ def render_yearly_compare_mode():
     from os.path import join as pjoin
     import plotly.express as px
 
-    # --- 0. パスと定数 ---
+    # --- 0. パス定義 ---
     LARVAE_PATH = pjoin(base_dir, "larvae.csv")
     COLLECTOR_NUMBER_PATH = pjoin(base_dir, "collector_number.csv")
     COLLECTOR_SIZE_PATH = pjoin(base_dir, "collector_size.csv")
@@ -1315,7 +1315,7 @@ def render_yearly_compare_mode():
     df_s = read_csv_path(COLLECTOR_SIZE_PATH, fp=file_fingerprint(COLLECTOR_SIZE_PATH))
 
     if df_l is None or df_c is None:
-        st.error("データ読み込みに失敗しました。")
+        st.error("データが見つかりません。")
         st.stop()
 
     # --- 2. ラーバ集計 ---
@@ -1337,14 +1337,14 @@ def render_yearly_compare_mode():
     df_e["Elapsed_Days"] = (df_e["Monitoring_Date"] - df_e["Drop_Date"]).dt.days
     df_e["Year"] = df_e["Drop_Date"].dt.year.astype(str)
 
-    # --- 4. 殻長集計 (小数点2位) ---
+    # --- 4. 殻長集計 (2桁丸め) ---
     df_s_agg = pd.DataFrame()
     if df_s is not None and not df_s.empty:
         df_s = df_s.copy()
         shell_col = next((c for c in df_s.columns if any(k in c.lower() for k in ["shell", "殻長"])), None)
         if shell_col:
             for c in ["Drop_Date", "Monitoring_Date"]: df_s[c] = pd.to_datetime(df_s[c], errors="coerce")
-            df_s["val"] = pd.to_numeric(df_s[shell_col], errors="coerce").round(2)
+            df_s["val"] = pd.to_numeric(df_s[shell_col], errors="coerce")
             df_s["Area"] = df_s["Area"].astype(str).str.strip()
             df_s_agg = df_s.dropna(subset=["Drop_Date", "Monitoring_Date", "val"]).copy()
             df_s_agg = df_s_agg.groupby(["Area", "Drop_Date", "Monitoring_Date"], as_index=False).agg(
@@ -1359,8 +1359,8 @@ def render_yearly_compare_mode():
 
     df_filtered = df_e[(df_e["Area"] == area_sel) & (df_e["Year"].isin(display_years))].copy()
 
-    # --- 6. グラフ ---
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.12,
+    # --- 6. グラフ構築 ---
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
                         subplot_titles=("経過日数 vs 平均付着数", "経過日数 vs 平均殻長 (mm)"))
 
     y_palette = px.colors.qualitative.D3
@@ -1394,15 +1394,15 @@ def render_yearly_compare_mode():
                     symbol=yr_sym, size=11, color=[0] + acc_larvae, colorscale="Viridis",
                     showscale=not colorbar_shown,
                     line=dict(width=2, color=edge_col),
-                    # カラーバーをグラフ上部に水平に配置
+                    # カラーバーを最下部へ配置
                     colorbar=dict(
                         title="累積大型ラーバ量",
                         thickness=15,
                         orientation='h',
-                        y=1.12, # グラフエリアより上
+                        y=-0.32, # 凡例よりさらに下
                         x=0.5,
                         xanchor='center',
-                        len=0.5
+                        len=0.6
                     ) if not colorbar_shown else None
                 ),
                 hovertemplate="経過: %{x}日<br>付着: %{y:.1f}<br>ラーバ累積: %{marker.color:.0f}<extra></extra>"
@@ -1421,28 +1421,26 @@ def render_yearly_compare_mode():
                         marker=dict(symbol=yr_sym, size=9, color=yr_col, line=dict(width=2, color=edge_col)),
                         error_y=dict(
                             type='data', symmetric=False,
-                            array=s_group["max_s"] - s_group["mean_s"],
-                            arrayminus=s_group["mean_s"] - s_group["min_s"],
+                            array=(s_group["max_s"] - s_group["mean_s"]),
+                            arrayminus=(s_group["mean_s"] - s_group["min_s"]),
                             visible=True, thickness=1.5, width=4, color=rgba_faint
                         ),
                         hovertemplate="経過: %{x}日<br>殻長(平均): %{y:.2f}mm<extra></extra>"
                     ), row=2, col=1)
 
-    # レイアウトの最終調整
+    # レイアウト調整: 凡例をグラフのすぐ下に
     fig.update_layout(
-        height=900,
-        margin=dict(t=120, b=150, r=20), # カラーバーと凡例のために上下余白を確保
+        height=950,
+        margin=dict(t=50, b=200, r=30), # 下側の余白を大きく確保
         template="plotly_white",
         hovermode="x unified",
-        # 凡例をグラフ下部に横並びで配置
         legend=dict(
             orientation="h",
             yanchor="top",
-            y=-0.15, 
+            y=-0.12, # グラフのすぐ下
             xanchor="center",
             x=0.5,
-            font=dict(size=11),
-            bgcolor="rgba(255,255,255,0.5)"
+            font=dict(size=11)
         )
     )
     
