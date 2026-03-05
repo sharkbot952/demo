@@ -1291,8 +1291,6 @@ def render_larvae_mode(selected_areas: Optional[List[str]]):
 
 # =========================
 # 経年比較モード（投入時期別：旬マージ版）
-# - 上段: 経過日数 vs 平均付着数
-# - 下段: 経過日数 vs 平均殻長（ヒゲ表示）
 # =========================
 
 def render_yearly_compare_mode():
@@ -1318,7 +1316,7 @@ def render_yearly_compare_mode():
         st.error("データが見つかりません。")
         st.stop()
 
-    # --- 2. 旬（Period）判定ロジック ---
+    # --- 2. 旬判定ロジック ---
     def get_period_label(dt):
         if pd.isna(dt): return "不明"
         day = dt.day
@@ -1327,23 +1325,26 @@ def render_yearly_compare_mode():
         else: p = "下旬"
         return f"{dt.month}月{p}"
 
-    # --- 3. 付着数データの集計（旬でマージ） ---
+    # --- 3. 付着数データの集計（エラー対策強化） ---
     df_c = df_c.copy()
     for c in ["Drop_Date", "Monitoring_Date"]: 
         df_c[c] = pd.to_datetime(df_c[c], errors="coerce")
     
+    # ★数値変換を確実に
+    df_c["Scallop"] = pd.to_numeric(df_c["Scallop"], errors="coerce")
+    
+    # 必要な列が揃っているデータのみ抽出
     df_c = df_c.dropna(subset=["Drop_Date", "Monitoring_Date", "Scallop"])
+    
     df_c["Year"] = df_c["Drop_Date"].dt.year.astype(str)
     df_c["Period_Label"] = df_c["Drop_Date"].apply(get_period_label)
     df_c["Elapsed_Days"] = (df_c["Monitoring_Date"] - df_c["Drop_Date"]).dt.days
     df_c["Area"] = df_c.get("Area", "Unknown").astype(str).str.strip()
 
-    # 旬単位で平均化
-    df_c_agg = df_c.groupby(["Area", "Year", "Period_Label", "Elapsed_Days"], as_index=False).agg({
-        "Scallop": "mean"
-    }).round(1)
+    # 旬単位で平均化（numeric_only=Trueはagg内で使えないため事前に絞る）
+    df_c_agg = df_c.groupby(["Area", "Year", "Period_Label", "Elapsed_Days"], as_index=False)[["Scallop"]].mean().round(1)
 
-    # --- 4. 殻長データの集計（旬でマージ） ---
+    # --- 4. 殻長データの集計（エラー対策強化） ---
     df_s_agg = pd.DataFrame()
     if df_s is not None and not df_s.empty:
         df_s = df_s.copy()
@@ -1351,17 +1352,23 @@ def render_yearly_compare_mode():
         if shell_col:
             for c in ["Drop_Date", "Monitoring_Date"]: 
                 df_s[c] = pd.to_datetime(df_s[c], errors="coerce")
+            
+            # ★数値変換を確実に
             df_s["val"] = pd.to_numeric(df_s[shell_col], errors="coerce")
+            df_s = df_s.dropna(subset=["Drop_Date", "Monitoring_Date", "val"])
+            
             df_s["Year"] = df_s["Drop_Date"].dt.year.astype(str)
             df_s["Period_Label"] = df_s["Drop_Date"].apply(get_period_label)
             df_s["Elapsed_Days"] = (df_s["Monitoring_Date"] - df_s["Drop_Date"]).dt.days
-            df_s["Area"] = df_s["Area"].astype(str).str.strip()
+            df_s["Area"] = df_s.get("Area", "Unknown").astype(str).str.strip()
             
-            df_s_agg = df_s.dropna(subset=["val"]).groupby(
+            df_s_agg = df_s.groupby(
                 ["Area", "Year", "Period_Label", "Elapsed_Days"], as_index=False
-            ).agg(
-                mean_s=("val", "mean"), min_s=("val", "min"), max_s=("val", "max")
-            ).round(2)
+            )[["val"]].agg(["mean", "min", "max"])
+            
+            # マルチインデックスのフラット化
+            df_s_agg.columns = ["_".join(col).strip("_") if isinstance(col, tuple) else col for col in df_s_agg.columns]
+            df_s_agg = df_s_agg.rename(columns={"val_mean": "mean_s", "val_min": "min_s", "val_max": "max_s"}).round(2)
 
     # --- 5. UI設定 ---
     all_years = sorted(df_c["Year"].unique(), reverse=True)
@@ -1371,7 +1378,7 @@ def render_yearly_compare_mode():
 
     # --- 6. グラフ構築 ---
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.12,
-                        subplot_titles=("経過日数 vs 平均付着数 (旬別マージ)", "経過日数 vs 平均殻長 (旬別マージ)"))
+                        subplot_titles=("経過日数 vs 平均付着数 (旬別)", "経過日数 vs 平均殻長 (旬別)"))
 
     y_palette = px.colors.qualitative.D3
     symbols = ["circle", "diamond", "square", "triangle-up", "star"]
@@ -1389,7 +1396,6 @@ def render_yearly_compare_mode():
             group = df_yr_c[df_yr_c["Period_Label"] == p_label].sort_values("Elapsed_Days")
             legend_label = f"{yr[-2:]}年 {p_label}"
 
-            # --- 上段: 付着数 ---
             fig.add_trace(go.Scatter(
                 x=[0] + group["Elapsed_Days"].tolist(),
                 y=[0] + group["Scallop"].tolist(),
@@ -1397,11 +1403,9 @@ def render_yearly_compare_mode():
                 line=dict(color=yr_col, width=1.5, 
                           dash=None if "上旬" in p_label else "dash" if "中旬" in p_label else "dot"),
                 marker=dict(symbol=yr_sym, size=10),
-                # 修正ポイント: %{{y:.1f}} に修正
                 hovertemplate=f"<b>{legend_label}</b><br>経過: %{{x}}日<br>付着: %{{y:.1f}}個<extra></extra>"
             ), row=1, col=1)
 
-            # --- 下段: 殻長 ---
             if not df_s_agg.empty:
                 s_group = df_s_agg[
                     (df_s_agg["Area"] == area_sel) & 
@@ -1424,20 +1428,12 @@ def render_yearly_compare_mode():
                         hovertemplate=f"<b>{legend_label}</b><br>殻長: %{{y:.2f}}mm<extra></extra>"
                     ), row=2, col=1)
 
-    # レイアウト設定
     fig.update_layout(
         height=800,
         margin=dict(t=100, b=50, r=30, l=100),
         template="plotly_white",
         hovermode="x unified",
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="left",
-            x=0,
-            font=dict(size=11)
-        )
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=11))
     )
     
     fig.update_yaxes(title=dict(text="付着数 (平均個/袋)", standoff=15), row=1, col=1)
