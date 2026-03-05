@@ -1383,7 +1383,7 @@ def render_yearly_compare_mode():
             group = group.sort_values("Elapsed_Days")
             edge_col = drop_edge_map[d_date]
             
-            # ★【修正1】凡例ラベルを短縮化 (例: 25/05/10)
+            # 短縮ラベル (例: 25/05/10)
             label = d_date.strftime('%y/%m/%d')
 
             acc_larvae = [sum(larv_map.get((area_sel, d.date()), 0) for d in pd.date_range(start=d_date, end=m)) for m in group["Monitoring_Date"]]
@@ -1398,12 +1398,11 @@ def render_yearly_compare_mode():
                     symbol=yr_sym, size=11, color=[0] + acc_larvae, colorscale="Viridis",
                     showscale=not colorbar_shown,
                     line=dict(width=2, color=edge_col),
-                    # ★【修正2】カラーバーのつぶれ防止と位置調整
                     colorbar=dict(
                         title=dict(text="累積大型ラーバ", font=dict(size=10)),
-                        thickness=15,    # 厚みを確保
+                        thickness=15,
                         orientation='h',
-                        y=-0.28,         # グラフの下側、十分な距離をとる
+                        y=-0.3, # X軸ラベルよりも下
                         x=0.5,
                         xanchor='center',
                         len=0.7
@@ -1432,29 +1431,25 @@ def render_yearly_compare_mode():
                         hovertemplate="殻長:%{y:.2f}mm<extra></extra>"
                     ), row=2, col=1)
 
+    # レイアウトの最終調整（エラー回避・安定版）
     fig.update_layout(
         height=850,
-        margin=dict(t=100, b=150, r=30, l=90), 
+        margin=dict(t=120, b=150, r=30, l=100), # 左余白を100に広げて見切れを完全に防ぐ
         template="plotly_white",
         hovermode="x unified",
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=1.03,
+            y=1.02,
             xanchor="left",
             x=0,
-            font=dict(size=11),
-            traceorder="normal",
-            # itemclick="toggleothers" を削除し、標準挙動に戻す
-            # これで「クリックした日付だけ」が消えたり点いたりします
-            itemclick="toggle", 
-            itemdoubleclick="showothers" # ダブルクリックでそれ以外を表示
+            font=dict(size=11)
         )
     )
     
-    # 軸ラベルの設定（単位と余白の調整）
-    fig.update_yaxes(title=dict(text="付着数 (平均個/袋)", standoff=10), row=1, col=1)
-    fig.update_yaxes(title=dict(text="殻長 (mm)", standoff=10), range=[0, 5], row=2, col=1)
+    # 軸ラベルの設定
+    fig.update_yaxes(title=dict(text="付着数 (平均個/袋)", standoff=15), row=1, col=1)
+    fig.update_yaxes(title=dict(text="殻長 (mm)", standoff=15), range=[0, 5], row=2, col=1)
     fig.update_xaxes(title_text="経過日数 (日)", row=2, col=1)
 
     st.plotly_chart(fig, use_container_width=True)
