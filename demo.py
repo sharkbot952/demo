@@ -1318,7 +1318,7 @@ def render_yearly_compare_mode():
         st.error("データが見つかりません。")
         st.stop()
 
-    # --- 2. 旬（Period）判定ロジックの定義 ---
+    # --- 2. 旬（Period）判定ロジック ---
     def get_period_label(dt):
         if pd.isna(dt): return "不明"
         day = dt.day
@@ -1375,8 +1375,6 @@ def render_yearly_compare_mode():
 
     y_palette = px.colors.qualitative.D3
     symbols = ["circle", "diamond", "square", "triangle-up", "star"]
-    
-    # 旬の並び順定義
     period_order = [f"{m}月{p}" for m in range(3, 8) for p in ["上旬", "中旬", "下旬"]]
 
     for i, yr in enumerate(sorted(display_years, reverse=True)):
@@ -1385,13 +1383,10 @@ def render_yearly_compare_mode():
         rgba_faint = yr_col.replace('rgb', 'rgba').replace(')', ', 0.25)') if 'rgb' in yr_col else yr_col
         
         df_yr_c = df_c_agg[(df_c_agg["Area"] == area_sel) & (df_c_agg["Year"] == yr)]
-        
-        # 旬の順序に従ってプロット
         active_periods = [p for p in period_order if p in df_yr_c["Period_Label"].unique()]
         
         for p_label in active_periods:
             group = df_yr_c[df_yr_c["Period_Label"] == p_label].sort_values("Elapsed_Days")
-            # 凡例ラベル例: 25年 4月中旬
             legend_label = f"{yr[-2:]}年 {p_label}"
 
             # --- 上段: 付着数 ---
@@ -1402,7 +1397,8 @@ def render_yearly_compare_mode():
                 line=dict(color=yr_col, width=1.5, 
                           dash=None if "上旬" in p_label else "dash" if "中旬" in p_label else "dot"),
                 marker=dict(symbol=yr_sym, size=10),
-                hovertemplate=f"<b>{legend_label}</b><br>経過: %{{x}}日<br>付着: %{{y:.1f}個<extra></extra>"
+                # 修正ポイント: %{{y:.1f}} に修正
+                hovertemplate=f"<b>{legend_label}</b><br>経過: %{{x}}日<br>付着: %{{y:.1f}}個<extra></extra>"
             ), row=1, col=1)
 
             # --- 下段: 殻長 ---
