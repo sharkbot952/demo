@@ -1338,7 +1338,7 @@ def render_yearly_compare_mode():
     df_e["Elapsed_Days"] = (df_e["Monitoring_Date"] - df_e["Drop_Date"]).dt.days
     df_e["Year"] = df_e["Drop_Date"].dt.year.astype(str)
 
-    # --- 4. 殻長集計 (小数点2位) ---
+    # --- 4. 殻長集計 ---
     df_s_agg = pd.DataFrame()
     if df_s is not None and not df_s.empty:
         df_s = df_s.copy()
@@ -1362,7 +1362,7 @@ def render_yearly_compare_mode():
     df_filtered = df_e[(df_e["Area"] == area_sel) & (df_e["Year"].isin(display_years))].copy()
 
     # --- 6. グラフ構築 ---
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.12,
                         subplot_titles=("経過日数 vs 平均付着数", "経過日数 vs 平均殻長"))
 
     y_palette = px.colors.qualitative.D3
@@ -1382,9 +1382,10 @@ def render_yearly_compare_mode():
         for d_date, group in df_yr.groupby("Drop_Date"):
             group = group.sort_values("Elapsed_Days")
             edge_col = drop_edge_map[d_date]
-            label = f"{yr}年 {d_date.strftime('%m/%d')}投入"
+            
+            # ★【修正1】凡例ラベルを短縮化 (例: 25/05/10)
+            label = d_date.strftime('%y/%m/%d')
 
-            # 投入日から調査日までの累積大型ラーバ計算
             acc_larvae = [sum(larv_map.get((area_sel, d.date()), 0) for d in pd.date_range(start=d_date, end=m)) for m in group["Monitoring_Date"]]
 
             # --- 上段: 付着数 ---
@@ -1397,13 +1398,18 @@ def render_yearly_compare_mode():
                     symbol=yr_sym, size=11, color=[0] + acc_larvae, colorscale="Viridis",
                     showscale=not colorbar_shown,
                     line=dict(width=2, color=edge_col),
-                    # カラーバーはグラフ最下部へ
+                    # ★【修正2】カラーバーのつぶれ防止と位置調整
                     colorbar=dict(
-                        title="累積大型ラーバ量", thickness=12, orientation='h',
-                        y=-0.22, x=0.5, xanchor='center', len=0.7
+                        title=dict(text="累積大型ラーバ", font=dict(size=10)),
+                        thickness=15,    # 厚みを確保
+                        orientation='h',
+                        y=-0.28,         # グラフの下側、十分な距離をとる
+                        x=0.5,
+                        xanchor='center',
+                        len=0.7
                     ) if not colorbar_shown else None
                 ),
-                hovertemplate="経過: %{x}日<br>付着: %{y:.1f}個/袋<extra></extra>"
+                hovertemplate="投入:%{x}日<br>付着:%{y:.1f}個<extra></extra>"
             ), row=1, col=1)
             if not colorbar_shown: colorbar_shown = True
 
@@ -1423,31 +1429,31 @@ def render_yearly_compare_mode():
                             arrayminus=(s_group["mean_s"] - s_group["min_s"]),
                             visible=True, thickness=1.2, width=3, color=rgba_faint
                         ),
-                        hovertemplate="経過: %{x}日<br>殻長: %{y:.2f}mm<extra></extra>"
+                        hovertemplate="殻長:%{y:.2f}mm<extra></extra>"
                     ), row=2, col=1)
 
-   # レイアウトの最終調整（凡例の折り返しと配置の最適化）
+    # ★【修正3】レイアウト設定（見切れ・凡例の水平化を強化）
     fig.update_layout(
         height=850,
-        margin=dict(t=120, b=100, r=20, l=85), # 上部余白(t)を少し広げて凡例スペースを確保
+        margin=dict(t=100, b=150, r=30, l=90), # 左余白を広げて見切れ防止、下余白を広げてバーを収める
         template="plotly_white",
         hovermode="x unified",
         legend=dict(
-            orientation="h",     # ★ここを水平(Horizontal)に変更
+            orientation="h",
             yanchor="bottom",
-            y=1.02,              # グラフの枠のすぐ上に配置
-            xanchor="center",
-            x=0.5,
-            font=dict(size=10),
-            traceorder="normal", # 投入日順に並べる
-            itemwidth=30         # 各項目の最小幅を指定して綺麗に並べる
+            y=1.03,         # グラフの直上
+            xanchor="left", # 左詰めにすることでスマホでも並びやすくする
+            x=0,
+            font=dict(size=11),
+            traceorder="normal",
+            itemclick="toggleothers" # クリックした要素以外を非表示にする（便利機能）
         )
-    )    
-
-    # 軸ラベルの設定
+    )
+    
+    # 軸ラベルの設定（単位と余白の調整）
     fig.update_yaxes(title=dict(text="付着数 (平均個/袋)", standoff=10), row=1, col=1)
     fig.update_yaxes(title=dict(text="殻長 (mm)", standoff=10), range=[0, 5], row=2, col=1)
-    fig.update_xaxes(title_text="投入からの経過日数 (日)", row=2, col=1)
+    fig.update_xaxes(title_text="経過日数 (日)", row=2, col=1)
 
     st.plotly_chart(fig, use_container_width=True)
 
