@@ -1464,16 +1464,59 @@ def render_yearly_compare_mode():
             shell_daily["Monitoring_Date_dt"] = pd.to_datetime(shell_daily["Monitoring_Date_dt"], errors="coerce")
             shell_daily = shell_daily.sort_values(["Monitoring_Date_dt", "Area", "Drop_Date_dt"]).reset_index(drop=True).copy()
 
-            df_plot = pd.merge_asof(
-                df_plot,
-                shell_daily,
-                left_on="Monitoring_Date_dt",
-                right_on="Monitoring_Date_dt",
-                by=["Area", "Drop_Date_dt"],
-                direction="nearest",
-                tolerance=pd.Timedelta(days=SHELL_TOL_DAYS),
-                suffixes=("", "_s"),
-            )
+            # merge_asof は on キーが DataFrame 全体で単調増加に並んでいる必要があるため、
+
+            # Area/Drop を含めた全体ソートでも 'left keys must be sorted' になるケースがあります。
+
+            # ここでは Area×Drop ごとに分割して近傍マッチします（グループ内でソート保証）。
+
+            _out = []
+
+            _tol = pd.Timedelta(days=SHELL_TOL_DAYS)
+
+            _right_map = {
+
+                (ra, rd): rg.sort_values('Monitoring_Date_dt')
+
+                for (ra, rd), rg in shell_daily.groupby(['Area', 'Drop_Date_dt'], sort=False)
+
+            }
+
+            for (la, ld), gl in df_plot.groupby(['Area', 'Drop_Date_dt'], sort=False):
+
+                gl = gl.sort_values('Monitoring_Date_dt')
+
+                gr = _right_map.get((la, ld))
+
+                if gr is None or gr.empty:
+
+                    gl = gl.copy()
+
+                    gl['shell_mean'] = pd.NA
+
+                    gl['shell_n'] = pd.NA
+
+                    _out.append(gl)
+
+                    continue
+
+                merged = pd.merge_asof(
+
+                    gl,
+
+                    gr[['Monitoring_Date_dt', 'shell_mean', 'shell_n']],
+
+                    on='Monitoring_Date_dt',
+
+                    direction='nearest',
+
+                    tolerance=_tol,
+
+                )
+
+                _out.append(merged)
+
+            df_plot = pd.concat(_out, ignore_index=True)
 
     # ---------- UI（エリア選択） ----------
     areas = sorted(df_plot["Area"].dropna().astype(str).unique().tolist())
