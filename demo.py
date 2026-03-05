@@ -1426,22 +1426,24 @@ def render_yearly_compare_mode():
                         hovertemplate="経過: %{x}日<br>殻長: %{y:.2f}mm<extra></extra>"
                     ), row=2, col=1)
 
-    # レイアウトの最終調整（見切れ・スマホ対策）
+   # レイアウトの最終調整（凡例の折り返しと配置の最適化）
     fig.update_layout(
         height=850,
-        margin=dict(t=100, b=120, r=30, l=85), # 左余白を広げてY軸数値の見切れを防止
+        margin=dict(t=120, b=100, r=20, l=85), # 上部余白(t)を少し広げて凡例スペースを確保
         template="plotly_white",
         hovermode="x unified",
         legend=dict(
-            orientation="h",
+            orientation="h",     # ★ここを水平(Horizontal)に変更
             yanchor="bottom",
-            y=1.05, # グラフタイトルの上（UIのすぐ下）に配置
+            y=1.02,              # グラフの枠のすぐ上に配置
             xanchor="center",
             x=0.5,
-            font=dict(size=10)
+            font=dict(size=10),
+            traceorder="normal", # 投入日順に並べる
+            itemwidth=30         # 各項目の最小幅を指定して綺麗に並べる
         )
-    )
-    
+    )    
+
     # 軸ラベルの設定
     fig.update_yaxes(title=dict(text="付着数 (平均個/袋)", standoff=10), row=1, col=1)
     fig.update_yaxes(title=dict(text="殻長 (mm)", standoff=10), range=[0, 5], row=2, col=1)
