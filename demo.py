@@ -46,8 +46,37 @@ def inject_compact_css():
       .block-container { padding-top: 0.8rem; padding-bottom: 0.8rem; }
       [data-testid="stSidebar"] { width: 18rem; }
       .stPlotlyChart, .element-container { margin-bottom: 0.6rem; }
+
+      /* --- ここから追加：ボタンを1段に収める設定 --- */
+      /* セグメントコントロール全体の余白を詰め、横並びを維持 */
+      div[data-testid="stSegmentedControl"] {
+          display: flex;
+          justify-content: flex-start;
+          width: 100%;
+      }
+      
+      div[data-testid="stSegmentedControl"] button {
+          flex: 1 1 auto;             /* 幅を柔軟に調整 */
+          font-size: 11px !important;  /* 文字を少し小さく(11-12px) */
+          padding: 4px 2px !important; /* 左右余白を限界まで削る */
+          min-width: 0px !important;   /* 最小幅の制限を解除 */
+          white-space: nowrap;         /* 文字の改行を禁止 */
+      }
+
+      /* 代替表示（st.radio）が選ばれた場合の設定 */
+      div[data-testid="stHorizontalRadio"] > div {
+          flex-wrap: nowrap !important; /* 折り返し禁止 */
+          overflow-x: auto;             /* 万が一の時は横スクロール */
+      }
+      div[data-testid="stHorizontalRadio"] label {
+          font-size: 11px !important;
+          padding: 2px 4px !important;
+          margin-right: 0px !important;
+      }
+      /* --- ここまで追加 --- */
     </style>
     """, unsafe_allow_html=True)
+
 
 def file_fingerprint(path: str) -> str:
     try:
