@@ -1289,10 +1289,6 @@ def render_larvae_mode(selected_areas: Optional[List[str]]):
         if i < len(sel_areas_main or []) - 1:
             st.markdown("---")
 
-
-
-
-
 # =========================
 # 経年比較モード（大型ラーバ累積 × 付着数 合算）
 # - X: Drop_Date 以降、Monitoring_Date 前までの 大型ラーバ(>=250)累積
@@ -1314,7 +1310,7 @@ def render_yearly_compare_mode():
 
     if df_l is None or df_c is None: st.stop()
 
-    # --- 1. ラーバ累積計算準備 ---
+    # --- 1. ラーバ累積計算 (辞書化) ---
     df_l = df_l.copy()
     df_l["Date"] = pd.to_datetime(df_l.get("Date"), errors="coerce")
     df_l["Area"] = df_l.get("Area", "").astype(str).str.strip()
@@ -1329,19 +1325,21 @@ def render_yearly_compare_mode():
         df_c[col] = pd.to_datetime(df_c.get(col), errors="coerce")
     df_c["Area"] = df_c.get("Area", "").astype(str).str.strip()
     df_e = df_c.dropna(subset=["Drop_Date", "Monitoring_Date", "Area"]).copy()
-    df_e["Scallop"] = pd.to_numeric(df_e["Scallop"], errors="coerce")
+    df_e["Scallop"] = pd.to_numeric(df_e["Scallop"], errors="coerce").fillna(0)
     df_e = df_e.groupby(["Area", "Drop_Date", "Monitoring_Date"], as_index=False).agg({"Scallop": "mean"})
 
-    # --- 3. メトリクス計算 ---
+    # --- 3. メトリクス計算（累積ラーバと殻長近傍マッチ） ---
     def _calc_metrics(row):
         area = row["Area"]
         d_start, d_end = row["Drop_Date"].date(), row["Monitoring_Date"].date()
+        # 投入から回収までの累積ラーバ
         x_sum = sum(larv_dict.get((area, d_start + timedelta(days=i)), 0) for i in range(max(0, (d_end - d_start).days)))
         
         s_val = np.nan
         if df_s is not None and not df_s.empty:
             shell_col = next((c for c in df_s.columns if any(k in c.lower() for k in ["shell", "殻長"])), None)
             if shell_col:
+                # 日付のズレを考慮した近傍マッチング (±5日)
                 s_mask = (df_s["Area"].astype(str).str.strip() == area) & \
                          (pd.to_datetime(df_s["Drop_Date"]).sub(row["Drop_Date"]).dt.days.abs() <= 5) & \
                          (pd.to_datetime(df_s["Monitoring_Date"]).sub(row["Monitoring_Date"]).dt.days.abs() <= 5)
@@ -1352,16 +1350,19 @@ def render_yearly_compare_mode():
     df_e["shell_filled"] = df_e.groupby(["Area", "Drop_Date"])["shell_raw"].transform(lambda x: x.ffill().bfill())
 
     # --- 4. 描画設定 ---
-    st.subheader("経年比較：成長プロセス軌跡（投入日起点）")
-    
-    # 年列を確定させておく（エラー対策）
+    st.subheader("経年比較：投入プロセスと殻長成長")
     df_e["Year_str"] = df_e["Drop_Date"].dt.year.astype(str)
     all_years = sorted(df_e["Year_str"].unique())
     
     area_sel = st.selectbox("エリア選択", ["ALL"] + sorted(df_e["Area"].unique()))
     df_p = df_e if area_sel == "ALL" else df_e[df_e["Area"] == area_sel].copy()
 
+    if df_p.empty:
+        st.info("表示できるデータがありません")
+        return
+
     fig = go.Figure()
+    # 年別の色と形状
     year_configs = {
         "2023": {"color": "#636EFA", "symbol": "circle"},
         "2024": {"color": "#EF553B", "symbol": "diamond"},
@@ -1370,14 +1371,13 @@ def render_yearly_compare_mode():
     }
     seen_years = set()
 
-    # --- 殻長強調スケーリング関数 ---
-    # 0.1mm -> 小さい点, 4.0mm -> 大きなプロット
+    # 殻長 (0.1mm - 4.0mm) の強調スケーリング
+    # 小さな変化が「粒の大きさ」の劇的な差として見えるように調整
     def scale_shell(s):
-        if pd.isna(s) or s <= 0: return 6  # 最小サイズ
-        # 0.1mmから4mmまでのわずかな差を面積差として強調する (s^1.5を使用)
-        return 7 + (s ** 1.5) * 8
+        if pd.isna(s) or s <= 0: return 7
+        # 1mmでサイズ約15, 4mmでサイズ約50になるように設定
+        return 8 + (s * 10) + (s ** 2)
 
-    # 軌跡を描画
     for (yr, area, d_date), group in df_p.groupby(["Year_str", "Area", "Drop_Date"]):
         group = group.sort_values("Monitoring_Date")
         conf = year_configs.get(yr, {"color": "#7f7f7f", "symbol": "cross"})
@@ -1385,38 +1385,37 @@ def render_yearly_compare_mode():
         x_start = d_date.replace(year=2000)
         x_ends = group["Monitoring_Date"].apply(lambda d: d.replace(year=2000)).tolist()
         
-        # 1. 軌跡の線（投入日 0 から 観測点まで）
+        # 1. 軌跡の線 (起点 Scallop=0 からのプロセス)
         fig.add_trace(go.Scatter(
-            x=[x_start] + x_ends, 
+            x=[x_start] + x_ends,
             y=[0] + group["Scallop"].tolist(),
             mode="lines",
-            line=dict(color=conf["color"], width=2.5, dash="dash" if yr != all_years[-1] else "solid"),
+            line=dict(color=conf["color"], width=2, dash="dash" if yr != all_years[-1] else "solid"),
             legendgroup=yr, showlegend=False, hoverinfo="skip"
         ))
 
-        # 2. 実測プロット
-        # カラーバーを一つだけ出すための判定
-        is_last_year = (yr == all_years[-1])
-        show_cbar = is_last_year and (yr not in seen_years)
+        # 2. 実測プロット (サイズ=殻長, 色=累積ラーバ)
+        # カラーバーの文字化けとエラーを防ぐため、シンプルな指定に
+        show_cbar = (yr == all_years[-1] and yr not in seen_years)
+        
+        marker_opts = dict(
+            symbol=conf["symbol"],
+            size=group["shell_filled"].apply(scale_shell),
+            color=group["X_sum"].fillna(0),
+            colorscale="Viridis",
+            showscale=show_cbar,
+            line=dict(width=1, color="white")
+        )
+        if show_cbar:
+            marker_opts["colorbar"] = dict(title="Larvae Sum", thickness=15, x=1.05)
 
         fig.add_trace(go.Scatter(
             x=x_ends, y=group["Scallop"],
             mode="markers",
-            name=f"{yr}年",
+            name=yr + "年",
             legendgroup=yr,
             showlegend=(yr not in seen_years),
-            marker=dict(
-                symbol=conf["symbol"],
-                size=group["shell_filled"].apply(scale_shell),
-                color=group["X_sum"],
-                colorscale="Viridis",
-                showscale=show_cbar,
-                colorbar=dict(
-                    title=dict(text="Larvae Sum", font=dict(size=12)), 
-                    x=1.05, thickness=15, titleside="top"
-                ) if show_cbar else None,
-                line=dict(width=1, color="white")
-            ),
+            marker=marker_opts,
             customdata=np.stack([
                 group["Drop_Date"].dt.strftime('%m/%d'),
                 group["Monitoring_Date"].dt.strftime('%m/%d'),
@@ -1426,16 +1425,15 @@ def render_yearly_compare_mode():
             ], axis=1),
             hovertemplate=(
                 "<b>%{yr}年 %{customdata[4]}</b><br>"
-                "投入: %{customdata[0]}<br>回収: %{customdata[1]}<br>"
+                "投入: %{customdata[0]} / 回収: %{customdata[1]}<br>"
                 "付着数: %{y:.1f} / 殻長: %{customdata[3]} mm<br>"
-                "ラーバ累積: %{customdata[2]}<br><extra></extra>"
+                "累積ラーバ: %{customdata[2]}<br><extra></extra>"
             )
         ))
         seen_years.add(yr)
 
     fig.update_layout(
-        xaxis_title="時期 (月/日)", 
-        yaxis_title="付着数（平均）",
+        xaxis_title="時期 (月/日)", yaxis_title="付着数平均",
         xaxis=dict(tickformat="%m/%d", range=[datetime(2000, 5, 1), datetime(2000, 8, 31)]),
         template="plotly_white", height=750,
         legend=dict(orientation="h", y=1.05, x=0),
