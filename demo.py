@@ -1305,333 +1305,331 @@ def render_larvae_mode(selected_areas: Optional[List[str]]):
 # =========================
 
 def render_yearly_compare_mode():
+    """経年比較（新：季節軸で重ねる・理解優先）
+
+    目的
+    - 横軸：年を無視した Monitoring_Date（MM-DD）
+    - 縦軸：同一 Area×Drop_Date 内の累積付着数（Monitoring順にcumsum）
+    - 点サイズ：殻長平均（mm）
+    - 点色：大型幼生（>=250µm）の区間累積（Drop_Date〜Monitoring_Date当日除外）
+
+    データ
+    - larvae.csv: Date, Area, [サイズ列 ...]（数値列名が幼生サイズ µm）
+    - collector_number.csv: Area, Drop_Date, Monitoring_Date, Scallop（Placeがあっても可）
+    - collector_size.csv: Area, Drop_Date, Monitoring_Date, Shell(mm) 等（列名揺れ吸収）
+
+    注意
+    - Scallop が「回収区間の増分」ではなく「既に累積値」の場合、cumsum すると二重計上になります。
+      その場合は UI の「Scallopは既に累積値」をONにしてください。
+    """
     import streamlit as st
     import pandas as pd
     import numpy as np
-    import plotly.express as px
     import plotly.graph_objects as go
 
-    # --- 読み込み（既存と同じ） ---
+    # --- 読み込み（キャッシュ更新のため fp を渡す）
     df_l = read_csv_path(LARVAE_PATH, fp=file_fingerprint(LARVAE_PATH))
     df_c = read_csv_path(COLLECTOR_NUMBER_PATH, fp=file_fingerprint(COLLECTOR_NUMBER_PATH))
-
-    # ★追加：殻サイズ（Shell）読み込み
-    COLLECTOR_SIZE_PATH = pjoin(base_dir, "collector_size.csv")
+    COLLECTOR_SIZE_PATH = pjoin(base_dir, 'collector_size.csv')
     df_s = read_csv_path(COLLECTOR_SIZE_PATH, fp=file_fingerprint(COLLECTOR_SIZE_PATH))
 
     if df_l is None or df_c is None:
         st.stop()
     if df_l.empty:
-        st.warning("larvae.csv が空です")
+        st.warning('larvae.csv が空です')
         return
     if df_c.empty:
-        st.warning("collector_number.csv が空です")
+        st.warning('collector_number.csv が空です')
         return
 
-    # ---------- larvae（日別 大型>=250） ----------
+    # --- UI
+    # Area フィルタ
+    df_c_tmp = df_c.copy()
+    df_c_tmp['Area'] = df_c_tmp.get('Area', '').astype(str).str.strip()
+    areas = sorted(df_c_tmp['Area'].dropna().unique().tolist())
+
+    c1, c2, c3 = st.columns([1.2, 1.2, 1.6])
+    with c1:
+        area_sel = st.selectbox('エリア', ['ALL'] + areas, index=0, key='yc2_area')
+    with c2:
+        scallop_is_cumulative = st.checkbox('Scallopは既に累積値（cumsumしない）', value=False, key='yc2_scallop_cum')
+    with c3:
+        use_log_color = st.checkbox('幼生累積（色）をlog表示', value=True, key='yc2_log_color')
+
+    # --- larvae（日別 大型>=250）
     df_l = df_l.copy()
-    df_l["Date"] = pd.to_datetime(df_l.get("Date"), errors="coerce")
-    df_l["Area"] = df_l.get("Area", "").astype(str).str.strip()
+    df_l['Date'] = pd.to_datetime(df_l.get('Date'), errors='coerce')
+    df_l['Area'] = df_l.get('Area', '').astype(str).str.strip()
 
     size_cols = [c for c in df_l.columns if str(c).isdigit()]
     for c in size_cols:
-        df_l[c] = pd.to_numeric(df_l[c], errors="coerce").fillna(0.0)
-
+        df_l[c] = pd.to_numeric(df_l[c], errors='coerce').fillna(0.0)
     large_cols = [c for c in size_cols if int(c) >= 250]
-    df_l["X_large_day"] = df_l[large_cols].sum(axis=1) if large_cols else 0.0
 
-    df_l = df_l.dropna(subset=["Date", "Area"]).copy()
-    if df_l.empty:
-        st.info("larvae.csv の有効行がありません")
-        return
+    df_l['X_large_day'] = df_l[large_cols].sum(axis=1) if large_cols else 0.0
+    df_l = df_l.dropna(subset=['Date', 'Area']).copy()
+    df_l['date'] = df_l['Date'].dt.date
 
-    df_l["date"] = df_l["Date"].dt.date
     df_l_day = (
-        df_l.groupby(["Area", "date"], as_index=False)["X_large_day"].sum()
+        df_l.groupby(['Area', 'date'], as_index=False)['X_large_day']
+        .sum()
+        .sort_values(['Area', 'date'])
     )
-    larv_by_area = {
-        a: g[["date", "X_large_day"]].copy()
-        for a, g in df_l_day.groupby("Area", sort=False)
-    }
+    larv_by_area = {a: g[['date', 'X_large_day']].copy() for a, g in df_l_day.groupby('Area', sort=False)}
 
-    # ---------- collector_number（イベント: Area×Drop×Monitoring / Place合算） ----------
+    # --- collector_number（イベント点：Area×Drop×Monitoring）
     df_c = df_c.copy()
-    df_c["Drop_Date"] = pd.to_datetime(df_c.get("Drop_Date"), errors="coerce")
-    df_c["Monitoring_Date"] = pd.to_datetime(df_c.get("Monitoring_Date"), errors="coerce")
-    df_c["Area"] = df_c.get("Area", "").astype(str).str.strip()
-    df_c["Scallop"] = pd.to_numeric(df_c.get("Scallop"), errors="coerce")
+    df_c['Drop_Date'] = pd.to_datetime(df_c.get('Drop_Date'), errors='coerce')
+    df_c['Monitoring_Date'] = pd.to_datetime(df_c.get('Monitoring_Date'), errors='coerce')
+    df_c['Area'] = df_c.get('Area', '').astype(str).str.strip()
+    df_c['Scallop'] = pd.to_numeric(df_c.get('Scallop'), errors='coerce')
 
-    df_c = df_c.dropna(subset=["Drop_Date", "Monitoring_Date", "Area", "Scallop"]).copy()
+    df_c = df_c.dropna(subset=['Drop_Date', 'Monitoring_Date', 'Area', 'Scallop']).copy()
+    if area_sel != 'ALL':
+        df_c = df_c[df_c['Area'] == area_sel].copy()
     if df_c.empty:
-        st.info("collector_number.csv の有効行がありません")
+        st.info('選択条件のデータがありません')
         return
 
-    df_c["Drop_Year"] = df_c["Drop_Date"].dt.year.astype(int)
-    df_c["Drop_day"] = df_c["Drop_Date"].dt.date
-    df_c["Monitoring_day"] = df_c["Monitoring_Date"].dt.date
+    df_c['Drop_Year'] = df_c['Drop_Date'].dt.year.astype(int)
+    df_c['Drop_day'] = df_c['Drop_Date'].dt.floor('D')
+    df_c['Monitoring_day'] = df_c['Monitoring_Date'].dt.floor('D')
 
-    # Place 合算（Area×Drop×Monitoring で1点）
+    # Place がある場合は平均でまとめる（従来踏襲）。合計にしたい場合はここを sum に変更。
     df_e = (
-        df_c.groupby(["Area", "Drop_day", "Monitoring_day"], as_index=False)
-            .agg(
-                Y_total=("Scallop", "mean"),
-                Drop_Year=("Drop_Year", "first")
-            )
-            .rename(columns={"Drop_day": "Drop_Date", "Monitoring_day": "Monitoring_Date"})
+        df_c.groupby(['Area', 'Drop_day', 'Monitoring_day'], as_index=False)
+        .agg(Y_inc=('Scallop', 'mean'), Drop_Year=('Drop_Year', 'first'))
+        .rename(columns={'Drop_day': 'Drop_Date', 'Monitoring_day': 'Monitoring_Date'})
+        .sort_values(['Area', 'Drop_Date', 'Monitoring_Date'])
     )
 
-    # 期間（日）も保持（hover用には残す）
-    df_e["duration_days"] = (
-        pd.to_datetime(df_e["Monitoring_Date"]) - pd.to_datetime(df_e["Drop_Date"])
-    )
-    df_e["duration_days"] = pd.to_numeric(df_e["duration_days"].dt.days, errors="coerce")
-    df_e = df_e.dropna(subset=["duration_days"]).copy()
-    df_e["duration_days"] = df_e["duration_days"].astype(int)
+    # 期間（日）も保持（hover用）
+    df_e['duration_days'] = (pd.to_datetime(df_e['Monitoring_Date']) - pd.to_datetime(df_e['Drop_Date'])).dt.days
+    df_e['duration_days'] = pd.to_numeric(df_e['duration_days'], errors='coerce').fillna(0).astype(int)
 
-    if df_e.empty:
-        st.info("有効なイベントがありません")
-        return
-
-    # ---------- X_total / overlap_days（行ごと計算） ----------
-    def _calc_x(row):
-        larv = larv_by_area.get(row["Area"])
+    # --- X_total（幼生区間累積）
+    def _calc_x(area: str, drop_day, mon_day):
+        larv = larv_by_area.get(area)
         if larv is None or larv.empty:
             return 0.0, 0
-        drop = row["Drop_Date"]
-        mon = row["Monitoring_Date"]
+        drop = pd.to_datetime(drop_day).date()
+        mon = pd.to_datetime(mon_day).date()
         # 仕様：Monitoring当日は含めない（< mon）
-        m = (larv["date"] >= drop) & (larv["date"] < mon)
-        return float(larv.loc[m, "X_large_day"].sum()), int(m.sum())
+        msk = (larv['date'] >= drop) & (larv['date'] < mon)
+        return float(larv.loc[msk, 'X_large_day'].sum()), int(msk.sum())
 
-    tmp = df_e.apply(_calc_x, axis=1, result_type="expand")
-    tmp.columns = ["X_total", "overlap_days"]
-
+    tmp = df_e.apply(lambda r: _calc_x(r['Area'], r['Drop_Date'], r['Monitoring_Date']), axis=1, result_type='expand')
+    tmp.columns = ['X_total', 'overlap_days']
     df_plot = pd.concat([df_e, tmp], axis=1)
-    df_plot = df_plot[df_plot["overlap_days"] > 0].copy()
+    df_plot = df_plot[df_plot['overlap_days'] > 0].copy()
     if df_plot.empty:
-        st.info("ラーバ採取日がイベント期間に重なるデータがありません")
+        st.info('ラーバ観測日がイベント期間に重なるデータがありません')
         return
 
-    # ---------- ★ Shell(mm) 平均をイベントに付与（collector_size.csv｜近傍マッチ） ----------
-    # 目的：殻長データは Monitoring_Date が数日ズレることがあるため、完全一致ではなく
-    #       「同一 Area × Drop_Date 内で Monitoring_Date 最近傍（tolerance付き）」で紐付ける。
-    SHELL_TOL_DAYS = 5  # ←許容日数（±N日）。必要なら調整
+    # --- Shell(mm) をイベントへ付与（近傍マッチ）
+    SHELL_TOL_DAYS = 5
+    df_plot['shell_mean'] = np.nan
+    df_plot['shell_n'] = np.nan
 
-    # collector_size.csv の想定列：Drop_Date, Monitoring_Date, Area, Place, Shell(mm)
-    if df_s is None or df_s.empty:
-        df_plot["shell_mean"] = np.nan
-        df_plot["shell_n"] = np.nan
-    else:
+    if df_s is not None and (not df_s.empty):
         df_s = df_s.copy()
-        df_s["Drop_Date"] = pd.to_datetime(df_s.get("Drop_Date"), errors="coerce")
-        df_s["Monitoring_Date"] = pd.to_datetime(df_s.get("Monitoring_Date"), errors="coerce")
-        df_s["Area"] = df_s.get("Area", "").astype(str).str.strip()
+        df_s['Drop_Date'] = pd.to_datetime(df_s.get('Drop_Date'), errors='coerce')
+        df_s['Monitoring_Date'] = pd.to_datetime(df_s.get('Monitoring_Date'), errors='coerce')
+        df_s['Area'] = df_s.get('Area', '').astype(str).str.strip()
 
-        # 殻長列名の揺れを吸収
         shell_col = None
-        for cand in ["Shell(mm)", "Shell", "Shell_mm", "shell", "shell_mm", "殻長", "殻長(mm)"]:
+        for cand in ['Shell(mm)', 'Shell', 'Shell_mm', 'shell', 'shell_mm', '殻長', '殻長(mm)']:
             if cand in df_s.columns:
                 shell_col = cand
                 break
 
-        if shell_col is None:
-            df_plot["shell_mean"] = np.nan
-            df_plot["shell_n"] = np.nan
-        else:
-            df_s[shell_col] = pd.to_numeric(df_s.get(shell_col), errors="coerce")
-
-            # 日別平均へ集約（同日複数個体/複数Place対応）
+        if shell_col is not None:
+            df_s[shell_col] = pd.to_numeric(df_s[shell_col], errors='coerce')
             shell_daily = (
-                df_s.dropna(subset=["Area", "Drop_Date", "Monitoring_Date", shell_col])
-                    .assign(
-                        Drop_Date_dt=lambda d: d["Drop_Date"].dt.floor("D"),
-                        Monitoring_Date_dt=lambda d: d["Monitoring_Date"].dt.floor("D"),
-                    )
-                    .groupby(["Area", "Drop_Date_dt", "Monitoring_Date_dt"], as_index=False)
-                    .agg(shell_mean=(shell_col, "mean"), shell_n=(shell_col, "count"))
+                df_s.dropna(subset=['Area', 'Drop_Date', 'Monitoring_Date', shell_col])
+                .assign(
+                    Drop_Date_dt=lambda d: d['Drop_Date'].dt.floor('D'),
+                    Monitoring_Date_dt=lambda d: d['Monitoring_Date'].dt.floor('D'),
+                )
+                .groupby(['Area', 'Drop_Date_dt', 'Monitoring_Date_dt'], as_index=False)
+                .agg(shell_mean=(shell_col, 'mean'), shell_n=(shell_col, 'count'))
+                .sort_values(['Area', 'Drop_Date_dt', 'Monitoring_Date_dt'])
             )
 
             df_plot = df_plot.assign(
-                Drop_Date_dt=pd.to_datetime(df_plot["Drop_Date"], errors="coerce").dt.floor("D"),
-                Monitoring_Date_dt=pd.to_datetime(df_plot["Monitoring_Date"], errors="coerce").dt.floor("D"),
+                Drop_Date_dt=pd.to_datetime(df_plot['Drop_Date']).dt.floor('D'),
+                Monitoring_Date_dt=pd.to_datetime(df_plot['Monitoring_Date']).dt.floor('D'),
             )
 
-            # 最近傍マッチ（同一 Area × Drop_Date_dt 内で Monitoring_Date_dt 最近傍）
-            df_plot = df_plot.dropna(subset=["Area", "Drop_Date_dt", "Monitoring_Date_dt"]).copy()
-            df_plot["Monitoring_Date_dt"] = pd.to_datetime(df_plot["Monitoring_Date_dt"], errors="coerce")
-            df_plot = df_plot.sort_values(["Monitoring_Date_dt", "Area", "Drop_Date_dt"]).reset_index(drop=True).copy()
-            shell_daily = shell_daily.dropna(subset=["Area", "Drop_Date_dt", "Monitoring_Date_dt"]).copy()
-            shell_daily["Monitoring_Date_dt"] = pd.to_datetime(shell_daily["Monitoring_Date_dt"], errors="coerce")
-            shell_daily = shell_daily.sort_values(["Monitoring_Date_dt", "Area", "Drop_Date_dt"]).reset_index(drop=True).copy()
+            df_plot = df_plot.sort_values(['Area', 'Drop_Date_dt', 'Monitoring_Date_dt']).reset_index(drop=True)
+            shell_daily = shell_daily.sort_values(['Area', 'Drop_Date_dt', 'Monitoring_Date_dt']).reset_index(drop=True)
 
+            # 近傍マッチ（同一 Area×Drop 内で Monitoring 最近傍）
             df_plot = pd.merge_asof(
                 df_plot,
                 shell_daily,
-                left_on="Monitoring_Date_dt",
-                right_on="Monitoring_Date_dt",
-                by=["Area", "Drop_Date_dt"],
-                direction="nearest",
+                left_on='Monitoring_Date_dt',
+                right_on='Monitoring_Date_dt',
+                by=['Area', 'Drop_Date_dt'],
+                direction='nearest',
                 tolerance=pd.Timedelta(days=SHELL_TOL_DAYS),
-                suffixes=("", "_s"),
+                suffixes=('', '_s'),
             )
 
-    # ---------- UI（エリア選択） ----------
-    areas = sorted(df_plot["Area"].dropna().astype(str).unique().tolist())
-    area_sel = st.selectbox("エリア", ["ALL"] + areas, index=0, key="yc_area_sel")
-    if area_sel != "ALL":
-        df_plot = df_plot[df_plot["Area"] == area_sel].copy()
-        if df_plot.empty:
-            st.info("選択エリアのデータがありません")
-            return
-
-    # 年（色）準備
-    df_plot["Drop_Year"] = pd.to_numeric(df_plot["Drop_Year"], errors="coerce")
-    df_plot = df_plot.dropna(subset=["Drop_Year"]).copy()
-    df_plot["Drop_Year"] = df_plot["Drop_Year"].astype(int)
-    df_plot["Drop_Year_cat"] = df_plot["Drop_Year"].astype(str)
-
-    years_present = sorted(df_plot["Drop_Year"].unique().tolist())
-
-    # 表示用の丸め
-    df_plot["X_total_disp"] = df_plot["X_total"].round(2)
-    df_plot["Y_total_disp"] = df_plot["Y_total"].round(0).astype(int)
-
-    # 同じ板（Area + Drop_Date）を識別（時系列線の単位）
-    df_plot["line_id"] = df_plot["Area"].astype(str) + " " + df_plot["Drop_Date"].astype(str)
-
-    # ★ Monitoring_Date 順で時系列
-    df_plot = df_plot.sort_values(["Area", "Drop_Date", "Monitoring_Date"]).copy()
-
-    # ---------- ★ Shell 欠損を「前後の時系列平均」で補完 ----------
-    # 同一 Area×Drop_Date 内で、Monitoring_Date の前後を参照して補完
-    df_plot["shell_filled"] = df_plot["shell_mean"]
-
-    for (a, d), g in df_plot.groupby(["Area", "Drop_Date"], sort=False):
-        # Monitoring_Date 順を保証
-        g = g.sort_values("Monitoring_Date")
-        prev = g["shell_mean"].ffill()
-        nxt = g["shell_mean"].bfill()
-
-        filled = g["shell_mean"].copy()
-        m = filled.isna()
-
-        both = m & prev.notna() & nxt.notna()
-        only_prev = m & prev.notna() & nxt.isna()
-        only_next = m & prev.isna() & nxt.notna()
-
+    # --- shell 欠損補完（同一 Area×Drop 内で前後平均）
+    df_plot['shell_filled'] = df_plot['shell_mean']
+    for (a, d), g in df_plot.groupby(['Area', 'Drop_Date'], sort=False):
+        g = g.sort_values('Monitoring_Date')
+        prev = g['shell_mean'].ffill()
+        nxt = g['shell_mean'].bfill()
+        filled = g['shell_mean'].copy()
+        msk = filled.isna()
+        both = msk & prev.notna() & nxt.notna()
+        only_prev = msk & prev.notna() & nxt.isna()
+        only_next = msk & prev.isna() & nxt.notna()
         filled.loc[both] = 0.5 * (prev.loc[both] + nxt.loc[both])
         filled.loc[only_prev] = prev.loc[only_prev]
         filled.loc[only_next] = nxt.loc[only_next]
+        df_plot.loc[g.index, 'shell_filled'] = filled.values
 
-        df_plot.loc[g.index, "shell_filled"] = filled.values
-
-    # ---------- ★ マーカーサイズ：shell_filled を 6～40 にスケール ----------
-    size_min = 6.0
-    size_max = 40.0
-    v = pd.to_numeric(df_plot["shell_filled"], errors="coerce")
-    vmin = float(v.min()) if v.notna().any() else np.nan
-    vmax = float(v.max()) if v.notna().any() else np.nan
+    # --- marker size: shell_filled を 6〜40 にスケール
+    size_min, size_max = 6.0, 40.0
+    v = pd.to_numeric(df_plot['shell_filled'], errors='coerce')
+    if v.notna().any():
+        vmin, vmax = float(v.min()), float(v.max())
+    else:
+        vmin, vmax = np.nan, np.nan
 
     if pd.notna(vmin) and pd.notna(vmax) and vmax > vmin:
-        df_plot["marker_size"] = size_min + (v - vmin) / (vmax - vmin) * (size_max - size_min)
+        df_plot['marker_size'] = size_min + (v - vmin) / (vmax - vmin) * (size_max - size_min)
     else:
-        df_plot["marker_size"] = size_min
+        df_plot['marker_size'] = size_min
+    df_plot['marker_size'] = df_plot['marker_size'].fillna(size_min)
 
-    df_plot["marker_size"] = df_plot["marker_size"].fillna(size_min)
+    # --- Y：同一 Area×Drop 内の累積付着
+    df_plot = df_plot.sort_values(['Area', 'Drop_Date', 'Monitoring_Date']).copy()
+    if scallop_is_cumulative:
+        df_plot['Y_cum'] = df_plot['Y_inc']
+    else:
+        df_plot['Y_cum'] = df_plot.groupby(['Area', 'Drop_Date'], sort=False)['Y_inc'].cumsum()
 
-    # ---------- 年→色マップ ----------
-    palette = px.colors.qualitative.Dark24
-    year_to_color = {str(y): palette[i % len(palette)] for i, y in enumerate(years_present)}
+    # --- X：年無視（アンカー年）
+    # Monitoring の月日を ANCHOR_YEAR に置換して同一季節軸に重ねる
+    df_plot['Mon_anchor'] = pd.to_datetime(
+        df_plot['Monitoring_Date'].dt.strftime(f'{ANCHOR_YEAR}-%m-%d'),
+        errors='coerce'
+    )
 
-    # 凡例は年のみ
-    shown_legend_year = set()
+    # --- 色：幼生累積（必要なら log 変換）
+    x_raw = pd.to_numeric(df_plot['X_total'], errors='coerce').fillna(0.0)
+    if use_log_color:
+        df_plot['X_color'] = np.log1p(x_raw)
+        cbar_title = '大型幼生累積(≥250)  log(1+x)'
+    else:
+        df_plot['X_color'] = x_raw
+        cbar_title = '大型幼生累積(≥250)'
+
+    # --- hover 用
+    df_plot['Drop_md'] = pd.to_datetime(df_plot['Drop_Date']).dt.strftime('%m/%d')
+    df_plot['Mon_md'] = pd.to_datetime(df_plot['Monitoring_Date']).dt.strftime('%m/%d')
+
+    # line_id（系列）
+    df_plot['line_id'] = df_plot['Area'].astype(str) + ' ' + df_plot['Drop_md'].astype(str)
+
+    # --- 描画
     fig = go.Figure()
 
-    # ---------- 描画：線（破線）＋点（Monitoring_Date の順） ----------
-    for line_id, g in df_plot.groupby("line_id", sort=False):
-        if g.empty:
-            continue
-
-        g = g.sort_values("Monitoring_Date").copy()
-        year_cat = str(g["Drop_Year_cat"].iloc[0])
-        color = year_to_color.get(year_cat, "#1f77b4")
-
-        show_legend = year_cat not in shown_legend_year
-        if show_legend:
-            shown_legend_year.add(year_cat)
-
-        # 線（控えめ）
-        fig.add_trace(go.Scatter(
-            x=g["X_total"],
-            y=g["Y_total"],
-            mode="markers",
-            cliponaxis=False,
-            line=dict(color=color, width=1.2),
-            showlegend=False,
-            hoverinfo="skip"
-        ))
-
-        # 点（丸）
-        fig.add_trace(go.Scatter(
-            x=g["X_total"],
-            y=g["Y_total"],
-            mode="markers",
-            name=year_cat,
-            legendgroup=year_cat,
-            showlegend=show_legend,
-            marker=dict(
-                symbol="circle",
-                size=g["marker_size"],
-                color=color,
-                opacity=0.85,
-                line=dict(color="rgba(0,0,0,0.25)", width=0.8),
-            ),
-            customdata=np.stack([
-                g["Area"].astype(str).values,
-                g["Drop_Date"].astype(str).values,
-                g["Monitoring_Date"].astype(str).values,
-                g["duration_days"].astype(int).values,
-                g["overlap_days"].astype(int).values,
-                g["X_total_disp"].astype(float).values,
-                g["Y_total_disp"].astype(int).values,
-                pd.to_numeric(g["shell_mean"], errors="coerce").round(2).values,     # raw shell
-                pd.to_numeric(g["shell_filled"], errors="coerce").round(2).values,  # filled shell
-            ], axis=1),
-            hovertemplate=(
-                "Area: %{customdata[0]}<br>"
-                "Drop_Date: %{customdata[1]}<br>"
-                "Monitoring_Date: %{customdata[2]}<br>"
-                "期間（日）: %{customdata[3]}<br>"
-                "ラーバ観測日数: %{customdata[4]}<br>"
-                "大型ラーバ累積(>=250): %{customdata[5]}<br>"
-                "付着数（平均）: %{customdata[6]}<br>"
-                "Shell平均(mm): %{customdata[7]}<br>"
-                "Shell補完(mm): %{customdata[8]}<br>"
+    # 1) 薄い破線（系列の推移）
+    for line_id, g in df_plot.groupby('line_id', sort=False):
+        g = g.sort_values('Monitoring_Date')
+        fig.add_trace(
+            go.Scatter(
+                x=g['Mon_anchor'],
+                y=g['Y_cum'],
+                mode='lines',
+                line=dict(color='rgba(0,0,0,0.25)', width=1.2, dash='dot'),
+                showlegend=False,
+                hoverinfo='skip',
             )
-        ))
+        )
 
-        # ---------- レイアウト ----------
-    fig.update_layout(
-        template="plotly_white",
-        height=650,
-        margin=dict(l=10, r=10, t=10, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
+    # 2) 点（色＝幼生累積、サイズ＝殻長）
+    custom = np.stack([
+        g.astype(str).values for g in [
+            df_plot['Area'],
+            df_plot['Drop_md'],
+            df_plot['Mon_md'],
+            df_plot['duration_days'].astype(int).astype(str),
+            df_plot['overlap_days'].astype(int).astype(str),
+        ]
+    ], axis=1)
+
+    fig.add_trace(
+        go.Scatter(
+            x=df_plot['Mon_anchor'],
+            y=df_plot['Y_cum'],
+            mode='markers',
+            marker=dict(
+                size=df_plot['marker_size'],
+                color=df_plot['X_color'],
+                colorscale='Viridis',
+                showscale=True,
+                colorbar=dict(title=cbar_title),
+                opacity=0.88,
+                line=dict(color='rgba(0,0,0,0.35)', width=0.8),
+            ),
+            customdata=np.c_[
+                df_plot['Area'].astype(str).values,
+                df_plot['Drop_md'].astype(str).values,
+                df_plot['Mon_md'].astype(str).values,
+                df_plot['duration_days'].astype(int).values,
+                df_plot['overlap_days'].astype(int).values,
+                df_plot['X_total'].round(2).values,
+                df_plot['Y_inc'].round(2).values,
+                df_plot['Y_cum'].round(2).values,
+                pd.to_numeric(df_plot['shell_mean'], errors='coerce').round(2).values,
+                pd.to_numeric(df_plot['shell_filled'], errors='coerce').round(2).values,
+            ],
+            hovertemplate=(
+                'Area: %{customdata[0]}<br>'
+                'Drop: %{customdata[1]} / Monitoring: %{customdata[2]}<br>'
+                '経過(日): %{customdata[3]} / ラーバ観測日数: %{customdata[4]}<br>'
+                '大型幼生累積(≥250): %{customdata[5]}<br>'
+                '付着（今回）: %{customdata[6]}<br>'
+                '付着（累積）: %{customdata[7]}<br>'
+                '殻長平均(mm): %{customdata[8]}<br>'
+                '殻長補完(mm): %{customdata[9]}<extra></extra>'
+            ),
+            showlegend=False,
+        )
     )
-    fig.update_xaxes(title_text="大型ラーバ累積（>=250）")
-    fig.update_yaxes(title_text="付着数（平均・Place合算）")
 
+    # --- レイアウト
+    fig.update_layout(
+        template='plotly_white',
+        height=700,
+        margin=dict(l=10, r=10, t=50, b=10),
+        title=dict(
+            text='季節軸（年無視）：Monitoring日 × 累積付着（点サイズ=殻長、色=大型幼生累積）',
+            x=0.01,
+            xanchor='left',
+            y=0.98,
+        ),
+    )
+    fig.update_xaxes(
+        title_text='Monitoring（MM-DD）',
+        tickformat='%m-%d',
+        showgrid=True,
+        gridcolor='rgba(0,0,0,0.06)',
+    )
+    fig.update_yaxes(
+        title_text='累積付着数（同一Drop内）',
+        showgrid=True,
+        gridcolor='rgba(0,0,0,0.06)',
+    )
+
+    st.caption('注：濃い色（幼生累積が多い）のに累積付着が伸びない系列は「幼生は多いが付着しない」逸脱の候補です。')
     st.plotly_chart(fig, use_container_width=True)
-
-# =========================
-# カレンダー部品（wt_test 由来）
-# =========================
-HEAD_LENGTH_RATIO = 0.55
-HEAD_HALF_HEIGHT_RATIO = 0.35
-SHAFT_WIDTH_PX = 4.0
-OUTLIER_TH = 4.0          # 観測なし時: corr - pred の閾値
-OUTLIER_TH_OBS = 2.0      # 観測あり時: corr - obs の閾値
-PHYS_MIN, PHYS_MAX = -1.5, 35.0
-
 def get_arrow_svg(direction_deg, speed_mps):
     if pd.isna(speed_mps) or pd.isna(direction_deg):
         return ""
