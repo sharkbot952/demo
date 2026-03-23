@@ -2496,7 +2496,6 @@ def render_map_mode():
         .replace('', np.nan)
     )
     df_gsi['GSI'] = pd.to_numeric(df_gsi['GSI'], errors='coerce')
-
     _sex_raw = df_gsi.get('Sex', 'Unknown').astype(str).str.strip().str.lower()
     df_gsi['Sex'] = np.where(
         _sex_raw.str.startswith('f') | _sex_raw.str.contains('female', na=False), 'F',
@@ -2876,13 +2875,13 @@ def render_map_mode():
         if mode == 'GSI':
             sub = df_gsi[(df_gsi['Area']==area) & (df_gsi['Year']==sel_year) & (df_gsi['week']==sel_week)].copy()
             gsi_vals = pd.to_numeric(sub.get('GSI'), errors='coerce').dropna()
-mean_gsi = float(gsi_vals.mean()) if not gsi_vals.empty else np.nan
-n25   = int((gsi_vals >= 25).sum())
-n20_  = int(((gsi_vals >= 20) & (gsi_vals < 25)).sum())
-nlt20 = int((gsi_vals < 20).sum())
-values = [n25, n20_, nlt20]; labels = ['≥25','20–24.9','<20']
-colors = colors_gsi; size = 60
-area_label = f"{area}（{mean_gsi:.1f}）" if not np.isnan(mean_gsi) else area
+            mean_gsi = float(gsi_vals.mean()) if not gsi_vals.empty else np.nan
+            n25   = int((gsi_vals >= 25).sum())
+            n20_  = int(((gsi_vals >= 20) & (gsi_vals < 25)).sum())
+            nlt20 = int((gsi_vals < 20).sum())
+            values = [n25, n20_, nlt20]; labels = ['≥25','20–24.9','<20']
+            colors = colors_gsi; size = 60
+            area_label = f"{area}（{mean_gsi:.1f}）" if not np.isnan(mean_gsi) else area
         else:
             sub = df_larv[(df_larv['Area']==area) & (df_larv['Year']==sel_year) & (df_larv['week']==sel_week)].copy()
             size_cols = [c for c in sub.columns if str(c).isdigit()]
