@@ -300,67 +300,6 @@ def compute_depthwise_regression(
             reg_depth[int(d)] = (float(alpha), float(beta))
     return (reg_depth if reg_depth else None, n_depth if n_depth else None)
 
-def preprocess_gsi(df_gsi: pd.DataFrame) -> pd.DataFrame:
-    df = df_gsi.copy()
-
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-
-    df["GSI"] = (
-        df["GSI"]
-        .astype(str)
-        .str.replace("%", "", regex=False)
-        .replace("", np.nan)
-        .astype(float)
-    )
-
-    df["Area"] = df["Area"].astype(str).str.strip()
-
-    if "Sex" in df.columns:
-        df["Sex"] = df["Sex"].astype(str).str.lower().str.strip()
-    else:
-        df["Sex"] = "unknown"
-
-    return df.dropna(subset=["Date", "Area"])
-
-def compute_map_gsi(
-    df_gsi: pd.DataFrame,
-    area: str,
-    week_start: pd.Timestamp,
-    week_end: pd.Timestamp
-) -> float:
-    g = df_gsi[
-        (df_gsi["Area"] == area) &
-        (df_gsi["Date"] >= week_start) &
-        (df_gsi["Date"] <= week_end)
-    ]
-
-    valid = g["GSI"].dropna()
-
-    if len(valid) >= 1:
-        return float(valid.mean())
-    else:
-        return np.nan
-
-def compute_comment_gsi(
-    df_gsi: pd.DataFrame,
-    area: str,
-    sex: str,
-    week_start: pd.Timestamp,
-    week_end: pd.Timestamp
-) -> float:
-    g = df_gsi[
-        (df_gsi["Area"] == area) &
-        (df_gsi["Sex"] == sex.lower()) &
-        (df_gsi["Date"] >= week_start) &
-        (df_gsi["Date"] <= week_end)
-    ]
-
-    valid = g["GSI"].dropna()
-
-    if len(valid) >= 1:
-        return float(valid.mean())
-    else:
-        return np.nan
 
 # =========================
 # GSI集計（オーバーレイ用｜Sex別に常時分割）
