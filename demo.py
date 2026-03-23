@@ -362,59 +362,6 @@ def compute_comment_gsi(
     else:
         return np.nan
 
-# =========================
-# GSI集計（オーバーレイ用｜Sex別に常時分割）
-# =========================
-@st.cache_data(show_spinner=False)
-def get_gsi_agg(selected_areas: List[str], years_sel: List[int]) \
-        -> Tuple[Dict[str, Dict[int, Dict[str, pd.DataFrame]]], List[str]]:
-    """
-    エリア×年×Sexごとの MMDD 順 mean/std DataFrame。
-    戻り値: (area_year_sex_dict, 全体MMDD順リスト)
-    - area_year_sex_dict[area][year][sex] = DataFrame(columns=["MMDD","mean","std","sort"])
-    """
-    df = read_csv_path(MATURITY_PATH)
-    if df is None:
-        return {}, []
-
-    # 前処理
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df["Year"] = df["Date"].dt.year
-    df["MMDD"] = df["Date"].dt.strftime("%m-%d")
-    if "GSI" in df.columns:
-        df["GSI"] = pd.to_numeric(df["GSI"], errors="coerce")
-    df = df.dropna(subset=["Date", "GSI"]).copy()
-
-    # Sex が無い or 欠損 → Unknown で補う
-    if "Sex" not in df.columns:
-        df["Sex"] = "Unknown"
-    else:
-        df["Sex"] = df["Sex"].fillna("Unknown").astype(str)
-
-    base = f"{ANCHOR_YEAR}-"
-    all_mmdd = sorted(
-        df["MMDD"].unique(),
-        key=lambda s: pd.to_datetime(base + s).day_of_year
-    )
-
-    out: Dict[str, Dict[int, Dict[str, pd.DataFrame]]] = {}
-    for area in selected_areas:
-        dfa = filter_by_areas(df, [area])
-        if dfa.empty:
-            continue
-        out[area] = {}
-        for y in years_sel:
-            d = dfa[dfa["Year"] == y]
-            if d.empty:
-                continue
-            out[area][y] = {}
-            # ▼ Sex 別に MMDD 集計
-            for sex, g in d.groupby("Sex"):
-                agg = g.groupby("MMDD")["GSI"].agg(["mean", "std"]).reset_index()
-                agg["sort"] = agg["MMDD"].apply(lambda s: pd.to_datetime(base + s).day_of_year)
-                agg = agg.sort_values("sort")
-                out[area][y][str(sex)] = agg
-    return out, all_mmdd
 
 # =========================
 # 水温グラフ（MM/DD入力・年選択適用・GSI帯の弱色化 版）
@@ -1064,7 +1011,7 @@ def render_yearly_compare_mode():
     st.plotly_chart(fig, use_container_width=True)
 
 # =========================
-# カレンダー部品（wt_test 由来）
+# カレンダー部品
 # =========================
 HEAD_LENGTH_RATIO = 0.55
 HEAD_HALF_HEIGHT_RATIO = 0.35
