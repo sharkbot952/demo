@@ -13,6 +13,9 @@ from streamlit.components.v1 import html as st_html
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import datetime as dt
+from plotly.subplots import make_subplots
+
 # =========================
 # 基本設定
 # =========================
@@ -26,11 +29,9 @@ base_dir = os.environ.get("APP_BASE_DIR", DEFAULT_BASE_DIR)
 def pjoin(*parts: str) -> str:
     return os.path.normpath(os.path.join(*parts))
 
-
 MATURITY_PATH = pjoin(base_dir, "maturity.csv")          
 LARVAE_PATH   = pjoin(base_dir, "larvae.csv")            
 COLLECTOR_NUMBER_PATH = pjoin(base_dir, "collector_number.csv")
-
 
 TITLE_SIZE = 18
 TEMP_MIN, TEMP_MAX = -2.0, 40.0
@@ -76,7 +77,6 @@ def inject_compact_css():
       /* --- ここまで追加 --- */
     </style>
     """, unsafe_allow_html=True)
-
 
 def file_fingerprint(path: str) -> str:
     try:
@@ -419,21 +419,6 @@ def get_gsi_agg(selected_areas: List[str], years_sel: List[int]) \
 # =========================
 # 水温グラフ（MM/DD入力・年選択適用・GSI帯の弱色化 版）
 # =========================
-from typing import List
-import os
-import datetime as dt
-import pandas as pd
-import numpy as np
-import streamlit as st
-import re
-from plotly.subplots import make_subplots
-import plotly.graph_objs as go
-import plotly.express as px
-
-# NOTE: 以下の変数/関数は環境に既存前提
-# base_dir, pjoin, ANCHOR_YEAR, MATURITY_PATH, TEMP_MIN, TEMP_MAX
-# load_dr_single_file, jst_to_naive, safe_merge_asof_by_depth, compute_depthwise_regression,
-# read_csv_path, get_gsi_agg
 
 def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
     # --- ファイル選択・存在チェック ---
@@ -480,453 +465,6 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
         else:
             return (y_end - start_anchor).days + 1 + (end_anchor - y_start).days + 1
 
-    # ======================
-    # サイドバー
-    # ======================
-    with st.sidebar:
-        selected_file = st.selectbox(
-            "対象エリアを選択",
-            sorted(dr_files),
-            key="sb_selected_file"
-        )
-
-        # DRプレビュー
-        df_dr_preview = load_dr_single_file(base_dir, selected_file)
-        if df_dr_preview.empty:
-            st.warning("DRデータが読み込めませんでした")
-            st.stop()
-
-        # 利用可能年（DR/GSIから統合）
-        years_dr = sorted(pd.to_datetime(df_dr_preview["datetime"]).dt.year.dropna().unique().tolist())
-        df_gsi_pre = read_csv_path(MATURITY_PATH)
-        years_gsi: list = []
-        if df_gsi_pre is not None and "Date" in df_gsi_pre.columns:
-            years_gsi = sorted(pd.to_datetime(df_gsi_pre["Date"]).dt.year.dropna().unique().tolist())
-        years_all = sorted(set(years_dr) | set(years_gsi))
-        latest_year = years_all[-1] if years_all else None
-
-        # 期間（MM/DD）
-        st.markdown("**期間指定（MM/DD）**")
-        latest_dt_dr = pd.to_datetime(df_dr_preview["datetime"]).max()
-        default_end_anchor = pd.Timestamp(f"{ANCHOR_YEAR}-{latest_dt_dr:%m-%d}")
-        default_start_anchor = default_end_anchor - pd.Timedelta(days=29)
-        start_mmdd = st.text_input("期間開始 (MM/DD)", value=f"{default_start_anchor:%m/%d}")
-        end_mmdd   = st.text_input("期間終了 (MM/DD)", value=f"{default_end_anchor:%m/%d}")
-
-        # 積算水温の起算（MM/DD）
-        sekisan_mmdd = st.text_input("積算水温の開始 (MM/DD)", value="01/01")
-
-        # 年選択（共通：水温/GSI）
-        selected_years = st.multiselect(
-            "表示年（水温/GSI）",
-            years_all,
-            default=[latest_year] if latest_year else [],
-            key="main_years"
-        )
-
-        overlay_gsi   = st.checkbox("GSIを右軸で重ねる", value=False, key="sb_overlay_gsi")
-        use_correction = st.checkbox("実測ベース補正(回帰)", value=False, key="sb_use_correction")
-        show_sekisan   = st.checkbox("積算水温を表示する", value=False, key="show_sekisan")
-
-    # 入力検証（MM/DD）
-    start_anchor_date    = parse_mmdd(start_mmdd)
-    end_anchor_date      = parse_mmdd(end_mmdd)
-    sekisan_anchor_date  = parse_mmdd(sekisan_mmdd)
-
-    if start_anchor_date is None or end_anchor_date is None:
-        st.warning("期間の月日は MM/DD 形式で入力してください（例：03/15）")
-        st.stop()
-    if show_sekisan and sekisan_anchor_date is None:
-        st.warning("積算水温の開始は MM/DD 形式で入力してください（例：01/01）")
-        st.stop()
-
-    title_suffix = f"（{start_anchor_date:%m-%d}〜{end_anchor_date:%m-%d}）"
-
-    # 固定・表示方針
-    tolerance_min = 35
-    show_obs_points = True
-    only_depths_with_obs_when_correct = True
-
-    # --- DR 読み込み（本処理用） ---
-    df_dr = load_dr_single_file(base_dir, selected_file)
-    if df_dr.empty:
-        st.warning("DRデータが読み込めませんでした")
-        st.stop()
-    df_dr["datetime"] = pd.to_datetime(df_dr["datetime"], errors="coerce")
-    df_dr = df_dr.dropna(subset=["datetime"]).copy()
-    df_dr["date_day"] = df_dr["datetime"].dt.date
-    df_dr["year"]     = df_dr["datetime"].dt.year
-    if "depth_m" in df_dr.columns:
-        df_dr["depth_m"] = pd.to_numeric(df_dr["depth_m"], errors="coerce").round(0).astype("Int64")
-
-    # 選択年フィルタ
-    if selected_years:
-        df_dr = df_dr[df_dr["year"].isin(selected_years)].copy()
-
-    # 深度一覧
-    depths_all = sorted(set(df_dr["depth_m"].dropna().astype(int).tolist())) if not df_dr.empty else []
-    default_depths = depths_all[:min(1, len(depths_all))]
-    selected_depths = st.multiselect("表示する水深(複数選択可)", depths_all, default=default_depths, key="main_depths")
-
-    # アンカーTimestamp
-    start_anchor_ts   = pd.Timestamp(start_anchor_date)
-    end_anchor_ts     = pd.Timestamp(end_anchor_date)
-    sekisan_anchor_ts = pd.Timestamp(sekisan_anchor_date if sekisan_anchor_date else start_anchor_date)
-
-    # OBS 読み込み（期間＋年フィルタ）
-    parent_folder_obs = pjoin(base_dir, "obs")
-    df_obs_period = pd.DataFrame()
-    if show_obs_points:
-        obs_path = pjoin(parent_folder_obs, selected_file)
-        if os.path.exists(obs_path):
-            try:
-                df_obs = pd.read_csv(obs_path)
-                df_obs["datetime"] = jst_to_naive(df_obs.get("Date"))
-                df_obs["depth_m"]  = pd.to_numeric(df_obs.get("Depth"), errors="coerce").round(0).astype("Int64")
-                df_obs = df_obs.rename(columns={"Temp": "obs_temp"})
-                df_obs = df_obs.dropna(subset=["datetime", "depth_m"]).copy()
-                df_obs["year"] = df_obs["datetime"].dt.year
-                df_obs = df_obs[df_obs["year"].isin(selected_years)] if selected_years else df_obs
-                mask_obs = mmdd_mask(df_obs["datetime"], start_anchor_ts, end_anchor_ts)
-                df_obs_period = df_obs[mask_obs].copy()
-            except Exception as e:
-                st.warning(f"OBSの読み込みに失敗しました: {obs_path} ({e})")
-                df_obs_period = pd.DataFrame()
-        else:
-            st.info("obs フォルダに同名CSVがありません。実測点は表示されません。")
-
-    # 補正学習（選択年の最新日時を基準に直近30日）
-    reg_depthwise, n_match_reg = None, None
-    if use_correction:
-        if df_dr.empty:
-            st.warning("補正用のDRデータがありません")
-        else:
-            mask_period = mmdd_mask(df_dr["datetime"], start_anchor_ts, end_anchor_ts)
-            df_dr_period = df_dr[mask_period].copy()
-            if df_dr_period.empty:
-                st.warning("選択期間内にDRデータがありません。最新時刻からの基準にフォールバックします。")
-                period_end_max = pd.to_datetime(df_dr["datetime"]).max()
-            else:
-                period_end_max = pd.to_datetime(df_dr_period["datetime"]).max()
-                
-            train_end_dt   = period_end_max - pd.Timedelta(days=10)
-            train_start_dt = train_end_dt - pd.Timedelta(days=30)
-
-            data_min = pd.to_datetime(df_dr["datetime"]).min()
-            if train_start_dt < data_min:
-                train_start_dt = data_min
-                
-            with st.spinner(  
-                f"回帰補正パラメータ算出中({selected_file}・{train_start_dt:%Y-%m-%d}〜{train_end_dt:%Y-%m-%d})..."
-            ):
-
-                reg_depthwise, n_match_reg = compute_depthwise_regression(
-                    base_dir, selected_file, tolerance_min,
-                    start_dt=train_start_dt, end_dt=train_end_dt, min_pairs=5
-                )
-
-    # GSI年選択（共通年を使用）
-    gsi_years_sel = selected_years if overlay_gsi else []
-    area_year_sex_dict, all_mmdd = ({}, [])
-    if overlay_gsi:
-        area_year_sex_dict, all_mmdd = get_gsi_agg(selected_areas_for_gsi, gsi_years_sel)
-    sex_style = {
-        "F": {"dash": "dash", "alpha_band": 0.18, "label": "F", "color": "#d62728"},  # 雌
-        "M": {"dash": "solid",  "alpha_band": 0.18, "label": "M", "color": "#1f77b4"},  # 雄
-        "Unknown": {"dash": "dot", "alpha_band": 0.18, "label": "Unknown", "color": "#7f7f7f"},
-    }
-
-    # カラーマップ
-    base_colors = px.colors.qualitative.Dark24
-    color_map = {}
-    for i, d in enumerate(selected_depths):
-        for idx_y, y in enumerate(selected_years):
-            color_map[(int(d), int(y))] = base_colors[(i * len(selected_years) + idx_y) % len(base_colors)]
-    year_color_map = {}
-    for (d, y), c in color_map.items():
-        if y not in year_color_map:
-            year_color_map[y] = c
-
-    dash_styles = ["solid", "dash", "dot", "dashdot", "longdash", "longdashdot"]
-
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
-        specs=[[{"secondary_y": True}], [{"secondary_y": False}]],
-        row_heights=[0.6, 0.4]
-    )
-
-    # 上段：水温（年別・深度別）＋補正＋積算水温
-    merged_for_points = pd.DataFrame()
-    if selected_depths and (not df_dr.empty):
-        traces_added = 0
-        for d in selected_depths:
-            # OBSがある水深だけに制限（補正ON時の方針）
-            if use_correction and only_depths_with_obs_when_correct and not df_obs_period.empty:
-                obs_depths = set(df_obs_period["depth_m"].dropna().astype(int).tolist())
-                if int(d) not in obs_depths:
-                    continue
-            for idx_y, y in enumerate(selected_years if selected_years else sorted(df_dr["year"].unique().tolist())):
-                df_dy = df_dr[(df_dr["depth_m"] == d) & (df_dr["year"] == y)].copy()
-                if df_dy.empty:
-                    continue
-                # 1Hリサンプル（中央値）・補間
-                if "pred_temp" in df_dy.columns and not df_dy.empty:
-                    df_dy = df_dy.groupby(["depth_m", "datetime"], as_index=False).agg({"pred_temp": "median"})
-                    df_dy = (
-                        df_dy.sort_values("datetime")
-                        .groupby("depth_m", group_keys=False)
-                        .apply(lambda g: (
-                            g.drop(columns=["depth_m"]).set_index("datetime")
-                            .resample("1H").median(numeric_only=True)
-                            .interpolate(method="time", limit=2)
-                            .reset_index()
-                            .assign(depth_m=int(g["depth_m"].iloc[0]))
-                        ))
-                    )
-                # 月日フィルタ
-                mask_dy = mmdd_mask(df_dy["datetime"], start_anchor_ts, end_anchor_ts)
-                df_dy = df_dy[mask_dy].copy()
-                if df_dy.empty:
-                    continue
-                # アンカーx・hover
-                df_dy["anchored_dt"] = to_anchor_ts(df_dy["datetime"])
-                custom_hover = df_dy["datetime"].dt.strftime("%m-%d %H:%M")
-                line_color = color_map[(int(d), int(y))]
-                dash = dash_styles[idx_y % len(dash_styles)]
-                y_raw = df_dy["pred_temp"].astype(float)
-
-                # 予測
-                pred_line_width  = 1 if use_correction else 2
-                pred_line_opacity = 0.6 if use_correction else 1.0
-                fig.add_trace(go.Scatter(
-                    x=df_dy["anchored_dt"], y=y_raw, mode="lines",
-                    name=f"{d}m 予測 {y}",
-                    line=dict(color=line_color, width=pred_line_width, dash=dash),
-                    opacity=pred_line_opacity,
-                    customdata=custom_hover,
-                    hovertemplate="予測: %{y:.2f} ℃<extra></extra>",
-                    legendgroup=f"{d}-{y}"
-                ), row=1, col=1, secondary_y=False)
-                traces_added += 1
-
-                # 実測値（OBS水温）
-                if not df_obs_period.empty:
-                    df_obs_dy = df_obs_period[(df_obs_period["depth_m"] == d) & (df_obs_period["year"] == y)].copy()
-                    if not df_obs_dy.empty:
-                        df_obs_dy = df_obs_dy.sort_values("datetime")
-                        obs_color = color_map.get((int(d), int(y)), "#666666")
-                        fig.add_trace(go.Scatter(
-                            x=pd.to_datetime(df_obs_dy["datetime"].dt.strftime(f"{ANCHOR_YEAR}-%m-%d %H:%M:%S")),
-                            y=df_obs_dy["obs_temp"], mode="markers",
-                            name=f"{d}m 実測水温 {y}",
-                            marker=dict(size=6, color=obs_color, symbol="circle", line=dict(color="#9e9e9e", width=0.6)),
-                            opacity=0.70,
-                            customdata=custom_hover,
-                            hovertemplate="実測: %{y:.2f} ℃<extra></extra>",
-                            legendgroup=f"{d}-{y}"
-                        ), row=1, col=1, secondary_y=False)
-                           
-                # 補正水温（補正ON時のみ）
-                if use_correction and (reg_depthwise is not None) and (int(d) in (reg_depthwise or {})):
-                    alpha, beta = reg_depthwise[int(d)]
-                    y_corr = np.clip(alpha + beta * y_raw.astype(float), TEMP_MIN, TEMP_MAX)
-                    fig.add_trace(go.Scatter(
-                        x=df_dy["anchored_dt"], y=y_corr, mode="lines",
-                        name=f"{d}m 補正水温 {y}",
-                        line=dict(color=line_color, width=3, dash="solid"),
-                        customdata=custom_hover,
-                        hovertemplate="補正: %{y:.2f} ℃<extra></extra>",
-                        legendgroup=f"{d}-{y}"
-                    ), row=1, col=1, secondary_y=False)
-                    
-
-                # 積算水温（日平均・オンのとき）
-                if show_sekisan:
-                    # ① 期間マスク“前”の df_dy_full を作る（深度・年で絞るが、月日フィルタはかけない）
-                    df_dy_full = df_dr[(df_dr["depth_m"] == d) & (df_dr["year"] == y)].copy()
-                    if "pred_temp" in df_dy_full.columns and not df_dy_full.empty:
-                        df_dy_full = (
-                            df_dy_full.sort_values("datetime")
-                            .groupby("depth_m", group_keys=False)
-                            .apply(lambda g: (
-                                g.drop(columns=["depth_m"]).set_index("datetime")
-                                 .resample("1H").median(numeric_only=True)
-                                 .interpolate(method="time", limit=2)
-                                 .reset_index()
-                                 .assign(depth_m=int(g["depth_m"].iloc[0]))
-                            ))
-                        )
-                        # ② 年内（日平均）を作成
-                        df_daily_full = (
-                            df_dy_full.assign(date_day=pd.to_datetime(df_dy_full["datetime"]).dt.date)
-                            .groupby("date_day")["pred_temp"].mean().reset_index()
-                            .sort_values("date_day")
-                        )
-                        df_daily_full["dt"] = pd.to_datetime(df_daily_full["date_day"])
-                        # ③ 積算の“計算”は「起算～期間終了」で行う（wrap対応）
-                        mask_calc = mmdd_mask(df_daily_full["dt"], sekisan_anchor_ts, end_anchor_ts)
-                        df_daily_calc = df_daily_full[mask_calc].copy()
-                        if not df_daily_calc.empty:
-                            # ④ “表示”は「期間開始～期間終了」でスライス（値は起算からの通算）
-                            mask_show = mmdd_mask(df_daily_calc["dt"], start_anchor_ts, end_anchor_ts)
-                            df_daily_show = df_daily_calc[mask_show].copy()
-                            if not df_daily_show.empty:
-                                x_sekisan = df_daily_show["dt"].map(lambda d0: pd.Timestamp(f"{ANCHOR_YEAR}-{d0:%m-%d}"))
-                                # 予測積算（起算からの通算）
-                                y_pred_accum = df_daily_calc["pred_temp"].cumsum()
-                                # 表示区間に合わせた値だけ抽出（dtで join）
-                                y_pred_accum_show = y_pred_accum.loc[df_daily_calc.index].reindex(df_daily_show.index).values
-                                fig.add_trace(go.Scatter(
-                                    x=x_sekisan, y=y_pred_accum_show, mode="lines",
-                                    name=f"{d}m 積算水温（予測） {y}",
-                                    line=dict(color=line_color, width=2, dash="dot"),
-                                    opacity=0.70
-                                ), row=1, col=1, secondary_y=False)
-                                # 補正積算（補正ON時のみ）：起算から通算→表示区間へ
-                                if use_correction and (reg_depthwise is not None) and (int(d) in reg_depthwise):
-                                    alpha, beta = reg_depthwise[int(d)]
-                                    y_corr_daily_calc = np.clip(alpha + beta * df_daily_calc["pred_temp"].astype(float),
-                                                                TEMP_MIN, TEMP_MAX)
-                                    y_corr_accum = y_corr_daily_calc.cumsum()
-                                    y_corr_accum_show = y_corr_accum.loc[df_daily_calc.index].reindex(df_daily_show.index).values
-                                    fig.add_trace(go.Scatter(
-                                        x=x_sekisan, y=y_corr_accum_show, mode="lines",
-                                        name=f"{d}m 積算水温（補正） {y}",
-                                        line=dict(color=line_color, width=3, dash="dot"),
-                                        opacity=1.0
-                                    ), row=1, col=1, secondary_y=False)
-
-
-                # 実測マージ用に保持
-                merged_for_points = pd.concat(
-                    [merged_for_points, df_dy[["datetime", "anchored_dt", "depth_m"]].copy()], axis=0
-                )
-
-    # GSIオーバーレイ（右軸）：平均±1σ帯＋平均線（弱色帯、年なし hover）
-    if overlay_gsi and area_year_sex_dict:
-        def mmdd_to_anchor(mmdd: str) -> pd.Timestamp:
-            return pd.to_datetime(f"{ANCHOR_YEAR}-{mmdd}")
-
-        for area, by_year in area_year_sex_dict.items():
-            for y, by_sex in by_year.items():
-                if not by_sex:
-                    continue
-                base_color_hex = year_color_map.get(int(y), "#1f77b4")
-                h = base_color_hex.lstrip('#')
-                r, g, b = (int(h[i:i+2], 16) for i in (0, 2, 4))
-
-                for sex, agg in by_sex.items():
-                    if agg is None or agg.empty:
-                        continue
-                
-                    x_dt_full = agg["MMDD"].apply(mmdd_to_anchor)
-                    mask_gsi = (mmdd_mask(x_dt_full, start_anchor_ts, end_anchor_ts))
-                    x_dt = x_dt_full[mask_gsi]
-                    agg_r = agg[mask_gsi].copy()
-                    if agg_r.empty:
-                        continue
-                    lower = agg_r["mean"] - agg_r["std"].fillna(0.0)
-                    upper = agg_r["mean"] + agg_r["std"].fillna(0.0)
-
-                    style = sex_style.get(sex, sex_style["Unknown"])
-                    fill_alpha = style["alpha_band"]
-                    dash = style["dash"]
-                    sex_lab = style["label"]
-
-
-                    fig.add_trace(go.Scatter(
-                        x=x_dt, y=lower, mode="lines", line=dict(width=0), hoverinfo="skip",
-                        showlegend=False
-                    ), row=1, col=1, secondary_y=True)
-                    fig.add_trace(go.Scatter(
-                        x=x_dt, y=upper, mode="lines", line=dict(width=0), fill="tonexty", hoverinfo="skip",
-                        fillcolor=f"rgba({r},{g},{b},0.15)",  # 年度色の薄色
-                        showlegend=False
-                    ), row=1, col=1, secondary_y=True)
-                    # 平均線（年度色）
-                    fig.add_trace(go.Scatter(
-                        x=x_dt, y=agg_r["mean"], mode="lines",
-                        name=f"{area}-{y} GSI平均({sex_lab})",
-                        line=dict(color=base_color_hex, width=2, dash=dash),
-                        customdata=agg_r["MMDD"],
-                        hovertemplate="%{customdata}<br>GSI平均: %{y:.2f}<extra></extra>",                      
-                        legendgroup=f"GSI-{area}-{y}-{sex_lab}",
-                    ), row=1, col=1, secondary_y=True)
-
-    # レイアウト
-    show_legend = st.checkbox("凡例を表示", value=True, key="main_show_legend")
-    legend_cfg = dict(orientation="h", yanchor="top", y=1.02, xanchor="right", x=1,
-                      font=dict(size=12), itemsizing="constant")
-    fig.update_layout(
-        title={"text": f"{selected_file} 水温 {title_suffix}", "y": 0.98, "x": 0.01,
-               "xanchor": "left", "font": {"size": 16}, "pad": {"t": 8}},
-        margin=dict(l=10, r=10, t=50, b=10),
-        height=700, template="plotly_white",
-        showlegend=bool(show_legend), legend=legend_cfg if show_legend else dict()
-    )
-    fig.update_layout(hovermode="x unified")
-
-    # X軸：自動刻み幅
-    total_days = anchored_day_span(start_anchor_ts, end_anchor_ts)
-    if total_days <= 14:
-        dtick = "D1"
-    elif total_days <= 60:
-        dtick = "D7"
-    elif total_days <= 180:
-        dtick = "M1"
-    else:
-        dtick = "M2"
-
-    tick0 = None
-    if dtick == "D7":
-        first_anchor = start_anchor_ts
-        offset_days = (0 - first_anchor.weekday()) % 7
-        tick0 = first_anchor + pd.Timedelta(days=offset_days)
-
-    y_start = pd.Timestamp(f"{ANCHOR_YEAR}-01-01")
-    y_end = pd.Timestamp(f"{ANCHOR_YEAR}-12-31") + pd.Timedelta(days=1)
-    if start_anchor_ts <= end_anchor_ts:
-        x_range = [start_anchor_ts, end_anchor_ts + pd.Timedelta(days=1)]
-    else:
-        x_range = [y_start, y_end]
-
-    fig.update_xaxes(
-        type="date",
-        range=x_range,
-        tickformat="%m-%d",
-        dtick=dtick,
-        tick0=tick0 if tick0 is not None else None,
-        showticklabels=True,
-        ticks="outside",
-        showline=True,
-        mirror=True,
-        showgrid=True,
-        gridcolor="rgba(0,0,0,0.08)",
-        hoverformat="%m-%d %H:%M",
-        title_text="月日(JST)",
-        row=1, col=1
-    )
-    fig.update_xaxes(
-        tickformat="%m-%d",
-        dtick=dtick,
-        tick0=tick0 if tick0 is not None else None,
-        showticklabels=True,
-        ticks="outside",
-        showline=True,
-        mirror=True,
-        showgrid=True,
-        gridcolor="rgba(0,0,0,0.08)",
-        hoverformat="%m-%d %H:%M",
-        row=2, col=1
-    )
-
-    fig.update_yaxes(title_text="水温 (℃)", secondary_y=False, tickfont=dict(size=11), row=1, col=1)
-    if overlay_gsi:
-        fig.update_yaxes(title_text="GSI", secondary_y=True, tickfont=dict(size=11), row=1, col=1)
-    else:
-        fig.update_yaxes(title_text="任意列(右軸)", secondary_y=True, tickfont=dict(size=11), row=1, col=1)
-
-    st.plotly_chart(fig, use_container_width=True)
 
 # =========================
 # ラーバモード（表はページ最下段にまとめて表示：初期は折りたたみ）
@@ -3403,28 +2941,19 @@ def render_map_mode():
 
     
 def reset_sidebar_state_for(prefix_keep: str):
-    """
-    現在のモード用 prefix 以外のサイドバー関連セッションキーを掃除する。
-    例: prefix_keep='map_' なら map_ 以外（sc_, larv_, water_, cal_ など）を削除。
-    """
     prefixes = ('map_', 'sc_', 'larv_', 'yc_', 'water_', 'cal_')
-    # list(...) でコピーしながら走査（削除によるRuntimeError回避）
     for k in list(st.session_state.keys()):
-        # 既知の接頭辞に一致 かつ 「保持したい prefix」ではない
         if k.startswith(prefixes) and not k.startswith(prefix_keep):
             try:
                 del st.session_state[k]
             except KeyError:
-                # 競合・同時削除が起きても無害化
                 pass
 
 def main():
-
     try:
         inject_compact_css()
     except Exception:
         pass
-    # カラムを使わずフル幅で表示
     try:
         mode = st.segmented_control(
             '',
@@ -3443,8 +2972,6 @@ def main():
             label_visibility="collapsed"
         )
 
-    # 以降は既存の分岐のままでOK
-    # すべてのArea候補（必要モードのみで使用）
     # ---- サイドバーUI（条件表示）----
     sel_areas = None
     with st.sidebar:
