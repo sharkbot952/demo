@@ -2619,13 +2619,17 @@ def render_map_mode():
     sel_week = week_labels[int(st.session_state['map_week_idx'])][0] if n > 0 else None
     sel_label = week_labels[int(st.session_state['map_week_idx'])][1] if n > 0 else ''
 
-
-
-
 # 対象Area（モードごと）
     if mode == 'GSI':
-        sub_week_gsi = df_gsi[(df_gsi['Year']==sel_year) & (df_gsi['week']==sel_week)].copy()
-        areas_with_data = sorted(sub_week_gsi['Area'].dropna().astype(str).unique().tolist())
+        sub_week_gsi = df_gsi[(df_gsi['Year'] == sel_year)].copy()
+        areas_with_data = []
+
+        for area, g in sub_week_gsi.groupby('Area'):
+            g_week = g[g['week'] == sel_week]
+            if g_week['GSI'].notna().sum() >= 1:
+                areas_with_data.append(str(area))
+
+        areas_with_data = sorted(set(areas_with_data))
     else:
         sub_week_larv = df_larv[(df_larv['Year']==sel_year) & (df_larv['week']==sel_week)].copy()
         size_cols = [c for c in sub_week_larv.columns if str(c).isdigit()]
