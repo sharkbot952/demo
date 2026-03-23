@@ -2490,17 +2490,18 @@ def render_map_mode():
     df_gsi['Date'] = pd.to_datetime(df_gsi['Date'], errors='coerce')
     df_gsi['Area'] = df_gsi.get('Area','').astype(str).str.strip()
     df_gsi['GSI'] = (
-    df_gsi.get('GSI', np.nan)
-    .astype(str)
-    .str.replace('%', '', regex=False)
-    .replace('', np.nan)
-)
-df_gsi['GSI'] = pd.to_numeric(df_gsi['GSI'], errors='coerce')
+        df_gsi.get('GSI', np.nan)
+        .astype(str)
+        .str.replace('%', '', regex=False)
+        .replace('', np.nan)
+    )
+    df_gsi['GSI'] = pd.to_numeric(df_gsi['GSI'], errors='coerce')
+
     _sex_raw = df_gsi.get('Sex', 'Unknown').astype(str).str.strip().str.lower()
-df_gsi['Sex'] = np.where(
-    _sex_raw.str.startswith('f') | _sex_raw.str.contains('female', na=False), 'F',
-    np.where(_sex_raw.str.startswith('m') | _sex_raw.str.contains('male', na=False), 'M', 'U')
-)
+    df_gsi['Sex'] = np.where(
+        _sex_raw.str.startswith('f') | _sex_raw.str.contains('female', na=False), 'F',
+        np.where(_sex_raw.str.startswith('m') | _sex_raw.str.contains('male', na=False), 'M', 'U')
+    )
     df_gsi['Year'] = df_gsi['Date'].dt.year
     df_gsi['week'] = df_gsi['Date'].dt.isocalendar().week.astype(int)
 
