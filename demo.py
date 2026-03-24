@@ -12,7 +12,7 @@ from datetime import date
 from streamlit.components.v1 import html as st_html
 from datetime import datetime, timedelta
 from pathlib import Path
-
+import hmac
 import datetime as dt
 from plotly.subplots import make_subplots
 
@@ -21,6 +21,32 @@ from plotly.subplots import make_subplots
 # =========================
 st.set_page_config(page_title="統合版", layout="wide")
 ANCHOR_YEAR = 2000
+
+
+def require_password_gate():
+    """
+    IDなしの共通パスワードで、最初だけ通す簡易ゲート。
+    セッション中は st.session_state["authed"]=True で保持。
+    """
+    if st.session_state.get("authed", False):
+        return  # すでに通過済み
+
+    st.title("ログイン")
+    st.caption("共通パスワードを入力してください。")
+
+    pw = st.text_input("パスワード", type="password", key="__pw")
+    if st.button("ログイン", use_container_width=True):
+        expected = st.secrets.get("APP_PASSWORD", "")
+        if expected and hmac.compare_digest(str(pw), str(expected)):
+            st.session_state["authed"] = True
+            st.session_state.pop("__pw", None)
+            st.success("ログインしました。")
+            st.rerun()
+        else:
+            st.error("パスワードが違います。")
+
+    st.stop()  # 通過するまで本体を表示しない
+
 
 
 DEFAULT_BASE_DIR = "data"
@@ -2914,6 +2940,7 @@ def reset_sidebar_state_for(prefix_keep: str):
                 pass
 
 def main():
+    require_password_gate()
     try:
         inject_compact_css()
     except Exception:
