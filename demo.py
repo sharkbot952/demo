@@ -2861,12 +2861,10 @@ def render_map_mode():
         )
 
     with c2:
-        # ラーバ通常デフォルト=週集計
-        default_idx = 1 if mode == "ラーバ" else 0
         norm_data_mode = st.radio(
             "",
             ["生データ", "週集計"],
-            index=default_idx,
+            index=1,
             key="map_norm_data_mode",
             horizontal=True,
             label_visibility="collapsed",
@@ -2885,15 +2883,11 @@ def render_map_mode():
 
     tab_norm, tab_cmp = st.tabs(["通常", "比較"])
 
-    # ============================================================
-    # 色
-    # ============================================================
+
     colors_gsi    = ["#d62728", "#ff7f0e", "#1f77b4"]  # ≥25 / 20–24.9 / <20
     colors_larvae = ["#1f77b4", "#ff7f0e", "#d62728"]  # <200 / 200–259 / ≥260
 
-    # ============================================================
-    # SVGユーティリティ
-    # ============================================================
+
     def _hex_to_rgb(h: str):
         h = (h or "").lstrip("#")
         if len(h) == 3:
@@ -3153,9 +3147,7 @@ def render_map_mode():
         svg += "</svg>"
         return svg
 
-    # ============================================================
-    # 共通：Area順 / week→月曜 / XYキャンバス
-    # ============================================================
+
     def _areas_sorted():
         tmp = df_area.copy()
         tmp["Area"] = tmp.get("Area", "").astype(str).str.strip()
@@ -3298,9 +3290,6 @@ def render_map_mode():
             scrolling=False
         )
 
-    # ============================================================
-    # 週集計：GSI（sum）
-    # ============================================================
     def _weekly_gsi_sum(df):
         d = df.copy()
         d = d.dropna(subset=["Date", "Area", "ISOYear", "week"])
@@ -3312,9 +3301,7 @@ def render_map_mode():
         out = d.groupby(["Area", "ISOYear", "week"], as_index=False)[["ge25","mid","lt20","n"]].sum()
         return out
 
-    # ============================================================
-    # 週集計：ラーバ（平均：同日合算→週平均）
-    # ============================================================
+
     def _weekly_larvae_mean(df):
         d = df.copy()
         d = d.dropna(subset=["Date", "Area", "ISOYear", "week"])
@@ -3343,9 +3330,7 @@ def render_map_mode():
         )
         return out
 
-    # ============================================================
-    # 通常タブ（数字は常に表示）
-    # ============================================================
+
     with tab_norm:
         base_df = df_gsi if mode == "GSI" else df_larv
         weeks_all = sorted(
@@ -3510,10 +3495,6 @@ def render_map_mode():
             """
             _render_xy(points, mondays, week_to_idx, norm_data_mode, legend_html)
 
-    # ============================================================
-    # 比較タブ：差分中心は「基準と比較が揃う点だけ」
-    #         GSI比較は中心数字なし
-    # ============================================================
     with tab_cmp:
         base_df = df_gsi if mode == "GSI" else df_larv
         weeks_all = sorted(
