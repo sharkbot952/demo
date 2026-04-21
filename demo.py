@@ -19,16 +19,13 @@ from pathlib import Path
 st.set_page_config(page_title="統合版", layout="wide")
 ANCHOR_YEAR = 2000
 
-
 def require_password_gate():
-    """IDなしの共通パスワードで、最初だけ通す簡易ゲート。
-    セッション中は st.session_state["authed"]=True で保持。
-    """
     if st.session_state.get("authed", False):
         return
 
     st.title("ログイン")
     st.caption("共通パスワードを入力してください。")
+
     pw = st.text_input("パスワード", type="password", key="__pw")
 
     if st.button("ログイン", use_container_width=True):
@@ -41,7 +38,7 @@ def require_password_gate():
         else:
             st.error("パスワードが違います。")
 
-    st.stop()  # 通過するまで本体を表示しない
+    st.stop()   # ← 重要：認証されるまで本体を表示しない
 
 DEFAULT_BASE_DIR = "data"
 base_dir = os.environ.get("APP_BASE_DIR", DEFAULT_BASE_DIR)
@@ -3717,6 +3714,8 @@ def reset_sidebar_state_for(prefix_keep: str):
 def main():
     import streamlit as st
 
+    require_password_gate()   # ← 追加（必須）
+
     try:
         inject_compact_css()
     except Exception:
@@ -3753,24 +3752,23 @@ def main():
         pass
 
     if mode == "水温図":
-        reset_sidebar_state_for('water_')
+        reset_sidebar_state_for("water_")
         render_water_mode()
     elif mode == "CMEM":
-        reset_sidebar_state_for('cmem_')
+        reset_sidebar_state_for("cmem_")
         render_cmem_mode()
     elif mode == "ラーバ":
-        reset_sidebar_state_for('larv_')
+        reset_sidebar_state_for("larv_")
         render_larvae_mode(sel_areas)
     elif mode == "経年比較":
-        reset_sidebar_state_for('yc_')
+        reset_sidebar_state_for("yc_")
         render_yearly_compare_mode()
     elif mode == "テスト":
-        reset_sidebar_state_for('map_')
+        reset_sidebar_state_for("map_")
         render_map_mode()
     else:
-        reset_sidebar_state_for('cal_')
+        reset_sidebar_state_for("cal_")
         render_calendar_mode()
-
 
 if __name__ == "__main__":
     main()
