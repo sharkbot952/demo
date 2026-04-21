@@ -2770,6 +2770,9 @@ def render_map_mode():
     GSI_FILE    = MATURITY_PATH
     LARVAE_FILE = LARVAE_PATH
 
+    # -------------------------
+    # CSV読み込み（保険）
+    # -------------------------
     def _read(path):
         for enc in ("utf-8", "utf-8-sig", "cp932"):
             try:
@@ -2793,12 +2796,15 @@ def render_map_mode():
         st.warning("file_summary.csv / maturity.csv / larvae.csv を配置してください。")
         return
 
-    # ---- 前処理 ----
+    # -------------------------
+    # 前処理
+    # -------------------------
     df_area["Area"] = df_area.get("Area", "").astype(str).str.strip()
     for col in ["Laf", "Lof"]:
         if col in df_area.columns:
             df_area[col] = pd.to_numeric(df_area[col], errors="coerce")
 
+    # GSI
     df_gsi["Date"] = pd.to_datetime(df_gsi.get("Date"), errors="coerce")
     df_gsi["Area"] = df_gsi.get("Area", "").astype(str).str.strip()
     df_gsi["GSI"] = (
@@ -2808,23 +2814,16 @@ def render_map_mode():
         .replace("", np.nan)
     )
     df_gsi["GSI"] = pd.to_numeric(df_gsi["GSI"], errors="coerce")
-
     iso_g = df_gsi["Date"].dt.isocalendar()
     df_gsi["ISOYear"] = iso_g.year.astype("Int64")
     df_gsi["week"]    = iso_g.week.astype("Int64")
 
+    # Larvae
     df_larv["Date"] = pd.to_datetime(df_larv.get("Date"), errors="coerce")
     df_larv["Area"] = df_larv.get("Area", "").astype(str).str.strip()
-
     iso_l = df_larv["Date"].dt.isocalendar()
     df_larv["ISOYear"] = iso_l.year.astype("Int64")
     df_larv["week"]    = iso_l.week.astype("Int64")
-
-    # ---- UI：モード & 年 & データモード ----
-    c1, c2, c3 = st.columns([1.4, 1.0, 1.6])
-    with c1:
-        mode = st.radio("", ["GSI", "ラーバ"], index=0, key="map_mode",
-                        horizontal=True, label_visibility="collapsed")
 
     years_all = sorted(
         set(df_gsi["ISOYear"].dropna().astype(int).unique()).union(
@@ -2835,33 +2834,66 @@ def render_map_mode():
         st.info("年度データがありません。")
         return
 
+    # ============================================================
+    # UI（上）：モード / 基準年 / 通常データ / 比較年
+    #   - 基準年はここ1か所のみ
+    #   - 通常/比較はタブ
+    # ============================================================
+    c0, c1, c2, c3 = st.columns([1.2, 1.0, 1.2, 2.0])
+
+    with c0:
+        mode = st.radio(
+            "",
+            ["GSI", "ラーバ"],
+            index=0,
+            key="map_mode",
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+
+    with c1:
+        base_year = st.selectbox(
+            "",
+            years_all,
+            index=len(years_all) - 1,
+            key="map_base_year",
+            label_visibility="collapsed",
+        )
+
     with c2:
-        sel_year = st.selectbox("", years_all, index=len(years_all) - 1,
-                                key="map_year", label_visibility="collapsed")
+        # ラーバ通常デフォルト=週集計
+        default_idx = 1 if mode == "ラーバ" else 0
+        norm_data_mode = st.radio(
+            "",
+            ["生データ", "週集計"],
+            index=default_idx,
+            key="map_norm_data_mode",
+            horizontal=True,
+            label_visibility="collapsed",
+        )
 
     with c3:
-        data_mode = st.radio("", ["生データ", "週集計"], index=0, key="map_data_mode",
-                             horizontal=True, label_visibility="collapsed")
+        candidates = [y for y in years_all if int(y) != int(base_year)]
+        default_comp = candidates[-2:] if len(candidates) >= 2 else candidates
+        comp_years = st.multiselect(
+            "",
+            candidates,
+            default=default_comp,
+            key="map_comp_years",
+            label_visibility="collapsed",
+        )
 
-    base_df = df_gsi if mode == "GSI" else df_larv
-    weeks_all = sorted(
-        base_df[base_df["ISOYear"] == int(sel_year)]["week"].dropna().astype(int).unique().tolist()
-    )
-    if not weeks_all:
-        st.info("選択年度に週データがありません。")
-        return
+    tab_norm, tab_cmp = st.tabs(["通常", "比較"])
 
-    def week_monday(isoyear: int, week: int):
-        return datetime.fromisocalendar(int(isoyear), int(week), 1)
-
-    week_info   = [(w, week_monday(sel_year, w)) for w in weeks_all]  # (week, monday)
-    mondays     = [m for (_w, m) in week_info]
-    week_to_idx = {w: i for i, (w, _m) in enumerate(week_info)}
-
-
+    # ============================================================
+    # 色
+    # ============================================================
     colors_gsi    = ["#d62728", "#ff7f0e", "#1f77b4"]  # ≥25 / 20–24.9 / <20
     colors_larvae = ["#1f77b4", "#ff7f0e", "#d62728"]  # <200 / 200–259 / ≥260
 
+    # ============================================================
+    # SVGユーティリティ
+    # ============================================================
     def _hex_to_rgb(h: str):
         h = (h or "").lstrip("#")
         if len(h) == 3:
@@ -2875,13 +2907,53 @@ def render_map_mode():
         r, g, b = _hex_to_rgb(h)
         return f"rgba({r},{g},{b},{a:.3f})"
 
-    def svg_pie(values, colors, size=60, labels=None, alpha=0.60, center_text=None, hover_text=None):
-        """
-        hover_text: hoverで出す文字（ここでは 'YYYY-mm-dd' のみ）
-        """
-        total = float(sum(values))
-        if total <= 0:
+    def _donut_sector_path(cx, cy, r_out, r_in, start_deg, end_deg):
+        a0 = np.radians(start_deg)
+        a1 = np.radians(end_deg)
+
+        x0o = cx + r_out * np.cos(a0)
+        y0o = cy + r_out * np.sin(a0)
+        x1o = cx + r_out * np.cos(a1)
+        y1o = cy + r_out * np.sin(a1)
+
+        x0i = cx + r_in * np.cos(a0)
+        y0i = cy + r_in * np.sin(a0)
+        x1i = cx + r_in * np.cos(a1)
+        y1i = cy + r_in * np.sin(a1)
+
+        span = (end_deg - start_deg) % 360.0
+        large = 1 if span > 180.0 else 0
+
+        d = (
+            f"M{x0o},{y0o} "
+            f"A{r_out},{r_out} 0 {large},1 {x1o},{y1o} "
+            f"L{x1i},{y1i} "
+            f"A{r_in},{r_in} 0 {large},0 {x0i},{y0i} "
+            f"Z"
+        )
+        return d
+
+    def _pie_wedge_path(cx, cy, r, start_deg, end_deg):
+        a0 = np.radians(start_deg)
+        a1 = np.radians(end_deg)
+
+        x1 = cx + r * np.cos(a0)
+        y1 = cy + r * np.sin(a0)
+        x2 = cx + r * np.cos(a1)
+        y2 = cy + r * np.sin(a1)
+
+        span = (end_deg - start_deg) % 360.0
+        large = 1 if span > 180.0 else 0
+
+        return f"M{cx},{cy} L{x1},{y1} A{r},{r} 0 {large},1 {x2},{y2} Z"
+
+    def svg_pie(values, colors, size=60, labels=None, alpha=0.60, center_text=None, hover_text=None,
+                stroke_width=2):
+        """単一円（通常用）: total<=0 なら空文字（数字だけ出る事故を防ぐ）"""
+        total = float(np.nansum(values))
+        if (not np.isfinite(total)) or total <= 0:
             return ""
+
         cx, cy, r = size / 2, size / 2, size / 2 - 2
         hover_text = (hover_text or "").strip()
 
@@ -2894,48 +2966,49 @@ def render_map_mode():
             s = str(center_text).strip()
             if s == "":
                 return ""
-            fz = max(10, int(size * 0.22))
+            fz = max(8, int(size * 0.20))
             return (
                 f"<text x='{cx}' y='{cy+4}' text-anchor='middle' "
                 f"font-size='{fz}' font-weight='700' "
-                f"fill='rgba(0,0,0,0.72)' "
-                f"stroke='rgba(255,255,255,0.75)' stroke-width='2' paint-order='stroke'>"
+                f"fill='rgba(0,0,0,0.78)' "
+                f"stroke='rgba(255,255,255,0.85)' stroke-width='2' paint-order='stroke'>"
                 f"{_html.escape(s)}</text>"
             )
 
-        nonzeros = [(i, v) for i, v in enumerate(values) if v > 0]
+        # ★追加：非ゼロが1つだけ（100%）なら circle で描く（弧の不具合回避）
+        nonzeros = [(i, float(v)) for i, v in enumerate(values)
+                    if (v is not None and np.isfinite(v) and float(v) > 1e-12)]
         if len(nonzeros) == 1:
             i, v = nonzeros[0]
             c = colors[i] if colors and i < len(colors) else "#888888"
             fill = _hex_to_rgba(c, alpha) if isinstance(c, str) and c.startswith("#") else c
-            ct = _center_text_svg()
-            return f"""
-            <svg width="{size}" height="{size}" viewBox="0 0 {size} {size}">
-              <circle cx="{cx}" cy="{cy}" r="{r}" fill="{fill}" stroke="rgba(255,255,255,0.85)" stroke-width="2">
-                <title>{_html.escape(_title(i, v))}</title>
-              </circle>
-              {ct}
-            </svg>
-            """.strip()
 
-        angles = [(v / total) * 360.0 for v in values]
+            svg = f"<svg width='{size}' height='{size}' viewBox='0 0 {size} {size}'>"
+            svg += (
+                f"<circle cx='{cx}' cy='{cy}' r='{r}' fill='{fill}' "
+                f"stroke='rgba(255,255,255,0.90)' stroke-width='{stroke_width}'>"
+                f"<title>{_html.escape(_title(i, v))}</title></circle>"
+            )
+            ct = _center_text_svg()
+            if ct:
+                svg += ct
+            svg += "</svg>"
+            return svg
+
         svg = f"<svg width='{size}' height='{size}' viewBox='0 0 {size} {size}'>"
         start = 0.0
         EPS = 1e-9
-        for i, ang in enumerate(angles):
-            if ang <= EPS:
+        for i, v in enumerate(values):
+            v = float(v) if v is not None else 0.0
+            if (not np.isfinite(v)) or v <= EPS:
                 continue
+            ang = (v / total) * 360.0
             end = start + ang
-            x1 = cx + r * np.cos(np.radians(start))
-            y1 = cy + r * np.sin(np.radians(start))
-            x2 = cx + r * np.cos(np.radians(end))
-            y2 = cy + r * np.sin(np.radians(end))
-            large = 1 if ang > 180.0 else 0
             c = colors[i] if colors and i < len(colors) else "#888888"
             fill = _hex_to_rgba(c, alpha) if isinstance(c, str) and c.startswith("#") else c
-            path = f"M{cx},{cy} L{x1},{y1} A{r},{r} 0 {large},1 {x2},{y2} Z"
-            svg += f"<path d='{path}' fill='{fill}' stroke='rgba(255,255,255,0.85)' stroke-width='2'>"
-            svg += f"<title>{_html.escape(_title(i, values[i]))}</title></path>"
+            d = _pie_wedge_path(cx, cy, r, start, end)
+            svg += f"<path d='{d}' fill='{fill}' stroke='rgba(255,255,255,0.90)' stroke-width='{stroke_width}'>"
+            svg += f"<title>{_html.escape(_title(i, v))}</title></path>"
             start = end
 
         ct = _center_text_svg()
@@ -2944,24 +3017,163 @@ def render_map_mode():
         svg += "</svg>"
         return svg
 
-    def _render_xy():
+    def svg_ring_with_pie_core(
+        core_values, ring_values, colors, size=60, labels=None,
+        core_alpha=0.92, ring_alpha=0.25,
+        center_text=None, hover_text=None,
+        draw_ring=True,
+        core_stroke_width=3,
+        ring_stroke_width=2
+    ):
+        """
+        比較用:
+          - 基準(core)は必ず描く（ただし core_total<=0 なら空を返す）
+          - 比較(ring)は draw_ring=True かつ ring_total>0 のときだけ描く
+          - GSI比較は center_text=None（中心数字なし）
+          - ラーバ比較は center_text=Δtotal（両方揃う点のみ）
+          - ★100%（単一カテゴリ）でも必ず描画する
+        """
+        core_total = float(np.nansum(core_values))
+        if (not np.isfinite(core_total)) or core_total <= 0:
+            return ""  # 「数字だけ」を防ぐ
+
+        hover_text = (hover_text or "").strip()
+        cx, cy = size / 2, size / 2
+
+        r_out = size / 2 - 2
+        ring_thick = max(7, int(size * 0.15))
+        gap = max(2, int(size * 0.03))
+        r_ring_in = r_out - ring_thick
+        r_core = max(2, r_ring_in - gap)
+
+        def _title(i, v):
+            if hover_text:
+                return hover_text
+            return (f"{labels[i]}: {v}" if labels else f"値: {v}")
+
+        def _center_text_svg():
+            if center_text is None:
+                return ""
+            s = str(center_text).strip()
+            if s == "":
+                return ""
+            fz = max(8, int(size * 0.20))
+            return (
+                f"<text x='{cx}' y='{cy+4}' text-anchor='middle' "
+                f"font-size='{fz}' font-weight='700' "
+                f"fill='rgba(0,0,0,0.82)' "
+                f"stroke='rgba(255,255,255,0.90)' stroke-width='2' paint-order='stroke'>"
+                f"{_html.escape(s)}</text>"
+            )
+
+        def _draw_ring(values):
+            if not draw_ring:
+                return ""
+            total = float(np.nansum(values))
+            if (not np.isfinite(total)) or total <= 0:
+                return ""
+
+            # ★追加：リングが単一カテゴリ100%なら「太いstroke円」で描く
+            nonz = [(i, float(v)) for i, v in enumerate(values)
+                    if (v is not None and np.isfinite(v) and float(v) > 1e-12)]
+            if len(nonz) == 1:
+                i, v = nonz[0]
+                c = colors[i] if colors and i < len(colors) else "#888888"
+                stroke_col = _hex_to_rgba(c, ring_alpha) if isinstance(c, str) and c.startswith("#") else c
+                r_mid = (r_out + r_ring_in) / 2.0
+                w_ring = (r_out - r_ring_in)
+                return (
+                    f"<circle cx='{cx}' cy='{cy}' r='{r_mid}' fill='none' "
+                    f"stroke='{stroke_col}' stroke-width='{w_ring}' stroke-linecap='butt'>"
+                    f"<title>{_html.escape(_title(i, v))}</title></circle>"
+                )
+
+            parts = []
+            start = 0.0
+            EPS = 1e-9
+            for i, v in enumerate(values):
+                v = float(v) if v is not None else 0.0
+                if (not np.isfinite(v)) or v <= EPS:
+                    continue
+                ang = (v / total) * 360.0
+                end = start + ang
+                c = colors[i] if colors and i < len(colors) else "#888888"
+                fill = _hex_to_rgba(c, ring_alpha) if isinstance(c, str) and c.startswith("#") else c
+                d = _donut_sector_path(cx, cy, r_out, r_ring_in, start, end)
+                parts.append(
+                    f"<path d='{d}' fill='{fill}' stroke='rgba(255,255,255,0.90)' stroke-width='{ring_stroke_width}'>"
+                    f"<title>{_html.escape(_title(i, v))}</title></path>"
+                )
+                start = end
+            return "".join(parts)
+
+        def _draw_core(values):
+            total = float(np.nansum(values))
+            if (not np.isfinite(total)) or total <= 0:
+                return ""
+
+            # ★追加：コアが単一カテゴリ100%なら circle で描く
+            nonz = [(i, float(v)) for i, v in enumerate(values)
+                    if (v is not None and np.isfinite(v) and float(v) > 1e-12)]
+            if len(nonz) == 1:
+                i, v = nonz[0]
+                c = colors[i] if colors and i < len(colors) else "#888888"
+                fill = _hex_to_rgba(c, core_alpha) if isinstance(c, str) and c.startswith("#") else c
+                return (
+                    f"<circle cx='{cx}' cy='{cy}' r='{r_core}' fill='{fill}' "
+                    f"stroke='rgba(255,255,255,0.95)' stroke-width='{core_stroke_width}'>"
+                    f"<title>{_html.escape(_title(i, v))}</title></circle>"
+                )
+
+            parts = []
+            start = 0.0
+            EPS = 1e-9
+            for i, v in enumerate(values):
+                v = float(v) if v is not None else 0.0
+                if (not np.isfinite(v)) or v <= EPS:
+                    continue
+                ang = (v / total) * 360.0
+                end = start + ang
+                c = colors[i] if colors and i < len(colors) else "#888888"
+                fill = _hex_to_rgba(c, core_alpha) if isinstance(c, str) and c.startswith("#") else c
+                d = _pie_wedge_path(cx, cy, r_core, start, end)
+                parts.append(
+                    f"<path d='{d}' fill='{fill}' stroke='rgba(255,255,255,0.95)' stroke-width='{core_stroke_width}'>"
+                    f"<title>{_html.escape(_title(i, v))}</title></path>"
+                )
+                start = end
+            return "".join(parts)
+
+        svg = f"<svg width='{size}' height='{size}' viewBox='0 0 {size} {size}'>"
+        svg += _draw_ring(ring_values)
+        svg += _draw_core(core_values)
+        ct = _center_text_svg()
+        if ct:
+            svg += ct
+        svg += "</svg>"
+        return svg
+
+    # ============================================================
+    # 共通：Area順 / week→月曜 / XYキャンバス
+    # ============================================================
+    def _areas_sorted():
         tmp = df_area.copy()
-        tmp["Area"] = tmp["Area"].astype(str).str.strip()
+        tmp["Area"] = tmp.get("Area", "").astype(str).str.strip()
         ok = tmp.dropna(subset=["Laf", "Lof"]).copy()
         if not ok.empty:
             ok = ok.sort_values(["Laf", "Lof"], ascending=[False, True])
-            areas_all = ok["Area"].dropna().astype(str).str.strip().unique().tolist()
-        else:
-            areas_all = sorted(tmp["Area"].dropna().astype(str).str.strip().unique().tolist())
+            return ok["Area"].dropna().astype(str).str.strip().unique().tolist()
+        return sorted(tmp["Area"].dropna().astype(str).str.strip().unique().tolist())
 
-        # レイアウト
+    def _render_xy(points, mondays, week_to_idx, data_mode, legend_html):
+        areas_all = _areas_sorted()
+
         X_STEP = 54
         ROW_H  = 66
         LEFT_W = 130
         TOP_H  = 46
         DAY_STEP = X_STEP / 7.0
 
-        # X軸ラベル：2週おき + 月替わり
         x_labels = []
         prev_m = None
         for i, m in enumerate(mondays):
@@ -2981,7 +3193,7 @@ def render_map_mode():
                 month_lines.append(i)
             prev_m = m.month
 
-        n_x = len(week_info)
+        n_x = len(mondays)
         n_y = len(areas_all)
         plot_w = (n_x - 1) * X_STEP + 2 * X_STEP
         plot_h = n_y * ROW_H
@@ -2995,22 +3207,165 @@ def render_map_mode():
                 return None
             i = week_to_idx[w]
             if data_mode == "週集計":
-                return i * X_STEP + X_STEP  # 月曜位置
-            dow = int(pd.Timestamp(dt).dayofweek)  # Mon=0..Sun=6
+                return i * X_STEP + X_STEP
+            dow = int(pd.Timestamp(dt).dayofweek)
             return i * X_STEP + X_STEP + dow * DAY_STEP
 
-        # 点を作る
-        points = []
+        css = f"""
+        <style>
+          .xywrap {{ border:1px solid #e5e5e5; border-radius:12px; background:#fff; padding:6px; }}
+          .xyframe {{ display:grid; grid-template-columns:{LEFT_W}px 1fr; grid-template-rows:{TOP_H}px {plot_h}px; gap:0; }}
+          .corner {{ grid-column:1; grid-row:1; background:#fafafa; border-right:1px solid #eee; border-bottom:1px solid #eee; }}
+          .ylabels {{ grid-column:1; grid-row:2; background: rgba(255,255,255,0.98); border-right:1px solid #eee; }}
+          .ylabel {{ height:{ROW_H}px; display:flex; align-items:center; justify-content:flex-start; padding-left:10px; font-weight:700; font-size:13px; color:#333;
+                    box-sizing:border-box; border-bottom:1px solid #f3f3f3; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+          .xscroll {{ grid-column:2; grid-row:1 / span 2; overflow-x:auto; overflow-y:hidden; -webkit-overflow-scrolling:touch; }}
+          .canvas {{ position:relative; width:{plot_w}px; height:{TOP_H + plot_h}px; }}
+          .xaxis {{ position:sticky; top:0; height:{TOP_H}px; background: rgba(255,255,255,0.98); border-bottom:1px solid #eee; z-index:10; }}
+          .xtick {{ position:absolute; bottom:6px; transform:translateX(-50%); font-size:12px; color:#444; white-space:nowrap; }}
+          .xminor {{ position:absolute; top:0; width:1px; height:{TOP_H}px; background:#f0f0f0; }}
+          .vline {{ position:absolute; left:0; top:{TOP_H}px; width:1px; height:{plot_h}px; background:#f0f0f0; z-index:2; }}
+          .vline.month {{ background:#d9d9d9; }}
+          .hline {{ position:absolute; left:0; top:0; width:{plot_w}px; height:1px; background:#f3f3f3; z-index:1; }}
+          .plot {{ position:absolute; left:0; top:{TOP_H}px; width:{plot_w}px; height:{plot_h}px; z-index:5; }}
+          .dot {{ position:absolute; transform:translate(-50%,-50%); overflow:visible; pointer-events:auto; }}
+        </style>
+        """
+
+        html = "<div class='xywrap'>"
+        html += "<div class='xyframe'>"
+        html += "<div class='corner'></div>"
+
+        html += "<div class='ylabels'>"
+        for a in areas_all:
+            html += f"<div class='ylabel'>{_html.escape(str(a))}</div>"
+        html += "</div>"
+
+        html += "<div class='xscroll'><div class='canvas'>"
+
+        html += "<div class='xaxis'>"
+        for i, m, show in x_labels:
+            x = i * X_STEP + X_STEP
+            html += f"<div class='xminor' style='left:{x}px;'></div>"
+            if show:
+                html += f"<div class='xtick' style='left:{x}px;'>{m:%m/%d}</div>"
+        html += "</div>"
+
+        for i in range(n_x):
+            x = i * X_STEP + X_STEP
+            cls = "vline month" if i in month_lines else "vline"
+            html += f"<div class='{cls}' style='left:{x}px;'></div>"
+
+        for j in range(n_y + 1):
+            y = j * ROW_H
+            html += f"<div class='hline' style='top:{TOP_H + y}px;'></div>"
+
+        html += "<div class='plot'>"
+        area_to_y = {a: (i * ROW_H + ROW_H / 2) for i, a in enumerate(areas_all)}
         jitter_counter = {}
 
+        for area, dt, svg, hover in points:
+            if area not in area_to_y:
+                continue
+            y = area_to_y[area]
+            x = x_from_date(pd.Timestamp(dt))
+            if x is None:
+                continue
+
+            key = (area, pd.Timestamp(dt).date())
+            k = jitter_counter.get(key, 0)
+            jitter_counter[key] = k + 1
+            if k == 0:
+                xj = x
+            else:
+                step = 4 * (k // 2 + 1)
+                sign = 1 if (k % 2 == 0) else -1
+                xj = x + sign * step
+
+            safe_tip = _html.escape(hover, quote=True)
+            html += f"<div class='dot' title='{safe_tip}' style='left:{xj:.1f}px; top:{y}px;'>{svg}</div>"
+
+        html += "</div>"  # plot
+        html += "</div></div>"  # canvas, xscroll
+        html += "</div>"  # xyframe
+        html += legend_html
+        html += "</div>"  # xywrap
+
+        iframe_h = max(420, min(1100, TOP_H + plot_h + 120))
+        st.components.v1.html(
+            f"<!doctype html><html><head><meta charset='utf-8'>{css}</head><body>{html}</body></html>",
+            height=iframe_h,
+            scrolling=False
+        )
+
+    # ============================================================
+    # 週集計：GSI（sum）
+    # ============================================================
+    def _weekly_gsi_sum(df):
+        d = df.copy()
+        d = d.dropna(subset=["Date", "Area", "ISOYear", "week"])
+        v = pd.to_numeric(d["GSI"], errors="coerce")
+        d["ge25"] = (v >= 25).astype(int)
+        d["mid"]  = ((v >= 20) & (v < 25)).astype(int)
+        d["lt20"] = (v < 20).astype(int)
+        d["n"]    = v.notna().astype(int)
+        out = d.groupby(["Area", "ISOYear", "week"], as_index=False)[["ge25","mid","lt20","n"]].sum()
+        return out
+
+    # ============================================================
+    # 週集計：ラーバ（平均：同日合算→週平均）
+    # ============================================================
+    def _weekly_larvae_mean(df):
+        d = df.copy()
+        d = d.dropna(subset=["Date", "Area", "ISOYear", "week"])
+        d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+
+        size_cols = [c for c in d.columns if str(c).isdigit()]
+        for c in size_cols:
+            d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
+
+        cols_lt200   = [c for c in size_cols if int(c) < 200]
+        cols_200_259 = [c for c in size_cols if 200 <= int(c) <= 259]
+        cols_ge260   = [c for c in size_cols if int(c) >= 260]
+
+        d["lt200"] = d[cols_lt200].sum(axis=1) if cols_lt200 else 0.0
+        d["mid"]   = d[cols_200_259].sum(axis=1) if cols_200_259 else 0.0
+        d["ge260"] = d[cols_ge260].sum(axis=1) if cols_ge260 else 0.0
+        d["total"] = d["lt200"] + d["mid"] + d["ge260"]
+
+        day = (
+            d.groupby(["Area","ISOYear","week","Date"], as_index=False)[["lt200","mid","ge260","total"]]
+            .sum()
+        )
+        out = (
+            day.groupby(["Area","ISOYear","week"], as_index=False)[["lt200","mid","ge260","total"]]
+            .mean()
+        )
+        return out
+
+    # ============================================================
+    # 通常タブ（数字は常に表示）
+    # ============================================================
+    with tab_norm:
+        base_df = df_gsi if mode == "GSI" else df_larv
+        weeks_all = sorted(
+            base_df[base_df["ISOYear"] == int(base_year)]["week"].dropna().astype(int).unique().tolist()
+        )
+        if not weeks_all:
+            st.info("選択年に週データがありません。")
+            return
+
+        mondays = [datetime.fromisocalendar(int(base_year), int(w), 1) for w in weeks_all]
+        week_to_idx = {w: i for i, w in enumerate(weeks_all)}
+        points = []
+
         if mode == "GSI":
-            d = df_gsi[df_gsi["ISOYear"] == int(sel_year)].copy()
-            d = d.dropna(subset=["Date"])
+            d = df_gsi[df_gsi["ISOYear"] == int(base_year)].copy().dropna(subset=["Date"])
             d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
             d["Area"] = d["Area"].astype(str).str.strip()
 
-            if data_mode == "生データ":
-                for (area, dt), g in d.groupby(["Area", "Date"]):
+            if norm_data_mode == "生データ":
+                for (area, dt), g in d.groupby(["Area","Date"]):
                     area = str(area).strip()
                     if area == "" or pd.isna(dt):
                         continue
@@ -3023,16 +3378,14 @@ def render_map_mode():
                     tot = n_ge25 + n_mid + n_lt20
                     if tot <= 0:
                         continue
-                    x = x_from_date(pd.Timestamp(dt))
-                    if x is None:
-                        continue
-                    hover_date = f"{pd.Timestamp(dt):%Y-%m-%d}"
+                    hover = f"{pd.Timestamp(dt):%Y-%m-%d}"
                     svg = svg_pie([n_ge25, n_mid, n_lt20], colors_gsi, size=50,
-                                  labels=["≥25", "20–24.9", "<20"], alpha=0.60,
-                                  center_text=None, hover_text=hover_date)
-                    points.append((area, pd.Timestamp(dt), x, svg, hover_date))
+                                  labels=["≥25","20–24.9","<20"], alpha=0.60,
+                                  center_text=None, hover_text=hover, stroke_width=2)
+                    if svg:
+                        points.append((area, pd.Timestamp(dt), svg, hover))
             else:
-                for (area, w), g in d.groupby(["Area", "week"]):
+                for (area, w), g in d.groupby(["Area","week"]):
                     area = str(area).strip()
                     if area == "" or pd.isna(w):
                         continue
@@ -3045,15 +3398,13 @@ def render_map_mode():
                     tot = n_ge25 + n_mid + n_lt20
                     if tot <= 0:
                         continue
-                    dt = pd.Timestamp(week_monday(int(sel_year), int(w)).date())
-                    x = x_from_date(dt)
-                    if x is None:
-                        continue
-                    hover_date = f"{dt:%Y-%m-%d}"
+                    dt = pd.Timestamp(datetime.fromisocalendar(int(base_year), int(w), 1))
+                    hover = f"{dt:%Y-%m-%d}"
                     svg = svg_pie([n_ge25, n_mid, n_lt20], colors_gsi, size=50,
-                                  labels=["≥25", "20–24.9", "<20"], alpha=0.60,
-                                  center_text=None, hover_text=hover_date)
-                    points.append((area, dt, x, svg, hover_date))
+                                  labels=["≥25","20–24.9","<20"], alpha=0.60,
+                                  center_text=None, hover_text=hover, stroke_width=2)
+                    if svg:
+                        points.append((area, dt, svg, hover))
 
             legend_html = """
             <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:13px;">
@@ -3063,39 +3414,40 @@ def render_map_mode():
               <div><span style="display:inline-block;width:12px;height:12px;background:#1f77b4;margin-right:6px;border:1px solid #fff;"></span>&lt;20</div>
             </div>
             """
+            _render_xy(points, mondays, week_to_idx, norm_data_mode, legend_html)
+
         else:
-            d = df_larv[df_larv["ISOYear"] == int(sel_year)].copy()
-            d = d.dropna(subset=["Date"])
-            d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
-            d["Area"] = d["Area"].astype(str).str.strip()
+            if norm_data_mode == "生データ":
+                d = df_larv[df_larv["ISOYear"] == int(base_year)].copy().dropna(subset=["Date"])
+                d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+                d["Area"] = d["Area"].astype(str).str.strip()
 
-            size_cols = [c for c in d.columns if str(c).isdigit()]
-            for c in size_cols:
-                d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
+                size_cols = [c for c in d.columns if str(c).isdigit()]
+                for c in size_cols:
+                    d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
 
-            cols_lt200   = [c for c in size_cols if int(c) < 200]
-            cols_200_259 = [c for c in size_cols if 200 <= int(c) <= 259]
-            cols_ge260   = [c for c in size_cols if int(c) >= 260]
+                cols_lt200   = [c for c in size_cols if int(c) < 200]
+                cols_200_259 = [c for c in size_cols if 200 <= int(c) <= 259]
+                cols_ge260   = [c for c in size_cols if int(c) >= 260]
 
-            def row_sums(r):
-                lt200 = float(r[cols_lt200].sum()) if cols_lt200 else 0.0
-                mid   = float(r[cols_200_259].sum()) if cols_200_259 else 0.0
-                ge260 = float(r[cols_ge260].sum()) if cols_ge260 else 0.0
-                total = lt200 + mid + ge260
-                return lt200, mid, ge260, total
+                def row_sums(r):
+                    lt200 = float(r[cols_lt200].sum()) if cols_lt200 else 0.0
+                    mid   = float(r[cols_200_259].sum()) if cols_200_259 else 0.0
+                    ge260 = float(r[cols_ge260].sum()) if cols_ge260 else 0.0
+                    total = lt200 + mid + ge260
+                    return lt200, mid, ge260, total
 
-            if data_mode == "生データ":
                 totals = []
-                for _, r in d.iterrows():
-                    *_, total = row_sums(r)
+                for _, rr in d.iterrows():
+                    *_, total = row_sums(rr)
                     if total > 0:
                         totals.append(total)
                 t95 = float(np.nanpercentile(np.array(totals, dtype=float), 95)) if totals else 1.0
                 t95 = max(t95, 1.0)
-                MIN_S, MAX_S = 22, 84
+                MIN_S, MAX_S = 32, 78
 
                 def size_from_total(total: float):
-                    s = np.sqrt(max(total, 0.0)) / np.sqrt(t95) * MAX_S
+                    s = np.sqrt(max(float(total), 0.0)) / np.sqrt(t95) * MAX_S
                     return int(min(MAX_S, max(MIN_S, s)))
 
                 for _, r in d.iterrows():
@@ -3106,50 +3458,47 @@ def render_map_mode():
                     lt200, mid, ge260, total = row_sums(r)
                     if total <= 0:
                         continue
-                    x = x_from_date(pd.Timestamp(dt))
-                    if x is None:
-                        continue
                     size = size_from_total(total)
-                    center_txt = str(int(total)) if size >= 44 else None  # 合計表示採用
-                    hover_date = f"{pd.Timestamp(dt):%Y-%m-%d}"
+                    center_txt = str(int(round(total)))  # ★常に表示
+                    hover = f"{pd.Timestamp(dt):%Y-%m-%d}"
                     svg = svg_pie([lt200, mid, ge260], colors_larvae, size=size,
-                                  labels=["<200", "200–259", "≥260"], alpha=0.55,
-                                  center_text=center_txt, hover_text=hover_date)
-                    points.append((area, pd.Timestamp(dt), x, svg, hover_date))
-            else:
-                agg = d.copy()
-                agg["lt200"] = agg[cols_lt200].sum(axis=1) if cols_lt200 else 0.0
-                agg["mid"]   = agg[cols_200_259].sum(axis=1) if cols_200_259 else 0.0
-                agg["ge260"] = agg[cols_ge260].sum(axis=1) if cols_ge260 else 0.0
-                agg["total"] = agg["lt200"] + agg["mid"] + agg["ge260"]
+                                  labels=["<200","200–259","≥260"], alpha=0.55,
+                                  center_text=center_txt, hover_text=hover, stroke_width=2)
+                    if svg:
+                        points.append((area, pd.Timestamp(dt), svg, hover))
 
-                g2 = agg.groupby(["Area", "week"], as_index=False)[["lt200","mid","ge260","total"]].sum()
-                totals = g2["total"].dropna().astype(float).tolist()
+            else:
+                wk = _weekly_larvae_mean(df_larv)
+                base = wk[wk["ISOYear"] == int(base_year)].copy()
+                if base.empty:
+                    st.info("週集計データがありません。")
+                    return
+
+                totals = base["total"].dropna().astype(float).tolist()
                 t95 = float(np.nanpercentile(np.array(totals, dtype=float), 95)) if totals else 1.0
                 t95 = max(t95, 1.0)
-                MIN_S, MAX_S = 22, 84
+                MIN_S, MAX_S = 32, 78
 
                 def size_from_total(total: float):
-                    s = np.sqrt(max(total, 0.0)) / np.sqrt(t95) * MAX_S
+                    s = np.sqrt(max(float(total), 0.0)) / np.sqrt(t95) * MAX_S
                     return int(min(MAX_S, max(MIN_S, s)))
 
-                for _, r in g2.iterrows():
+                for _, r in base.iterrows():
                     area = str(r["Area"]).strip()
                     w = int(r["week"])
-                    lt200 = float(r["lt200"]); mid = float(r["mid"]); ge260 = float(r["ge260"]); total = float(r["total"])
-                    if area == "" or total <= 0:
+                    lt200 = float(r["lt200"]); mid = float(r["mid"]); ge260 = float(r["ge260"])
+                    total = float(r["total"])
+                    if area == "" or (not np.isfinite(total)) or total <= 0:
                         continue
-                    dt = pd.Timestamp(week_monday(int(sel_year), int(w)).date())
-                    x = x_from_date(dt)
-                    if x is None:
-                        continue
+                    dt = pd.Timestamp(datetime.fromisocalendar(int(base_year), int(w), 1))
                     size = size_from_total(total)
-                    center_txt = str(int(total)) if size >= 44 else None
-                    hover_date = f"{dt:%Y-%m-%d}"
+                    center_txt = str(int(round(total)))  # ★常に表示（週平均の整数）
+                    hover = f"{dt:%Y-%m-%d}"
                     svg = svg_pie([lt200, mid, ge260], colors_larvae, size=size,
-                                  labels=["<200", "200–259", "≥260"], alpha=0.55,
-                                  center_text=center_txt, hover_text=hover_date)
-                    points.append((area, dt, x, svg, hover_date))
+                                  labels=["<200","200–259","≥260"], alpha=0.55,
+                                  center_text=center_txt, hover_text=hover, stroke_width=2)
+                    if svg:
+                        points.append((area, dt, svg, hover))
 
             legend_html = """
             <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:13px;">
@@ -3157,197 +3506,154 @@ def render_map_mode():
               <div><span style="display:inline-block;width:12px;height:12px;background:#d62728;margin-right:6px;border:1px solid #fff;"></span>≥260</div>
               <div><span style="display:inline-block;width:12px;height:12px;background:#ff7f0e;margin-right:6px;border:1px solid #fff;"></span>200–259</div>
               <div><span style="display:inline-block;width:12px;height:12px;background:#1f77b4;margin-right:6px;border:1px solid #fff;"></span>&lt;200</div>
-              <div style="color:#666;">（円サイズ＝合計数の相対）</div>
             </div>
             """
+            _render_xy(points, mondays, week_to_idx, norm_data_mode, legend_html)
 
-        # ---- ここが重要：固定列（左）とスクロール（右）を分離 ----
-        css = f"""
-        <style>
-          .xywrap {{
-            border:1px solid #e5e5e5;
-            border-radius:12px;
-            background:#fff;
-            padding:6px;
-          }}
-          .xyframe {{
-            display:grid;
-            grid-template-columns: {LEFT_W}px 1fr;
-            grid-template-rows: {TOP_H}px {plot_h}px;
-            gap:0;
-          }}
-          .corner {{
-            grid-column:1; grid-row:1;
-            background:#fafafa;
-            border-right:1px solid #eee;
-            border-bottom:1px solid #eee;
-          }}
-          .ylabels {{
-            grid-column:1; grid-row:2;
-            background: rgba(255,255,255,0.98);
-            border-right:1px solid #eee;
-          }}
-          .ylabel {{
-            height:{ROW_H}px;
-            display:flex;
-            align-items:center;
-            justify-content:flex-start;
-            padding-left:10px;
-            font-weight:700;
-            font-size:13px;
-            color:#333;
-            box-sizing:border-box;
-            border-bottom:1px solid #f3f3f3;
-            white-space:nowrap;
-            overflow:hidden;
-            text-overflow:ellipsis;
-          }}
-          .xscroll {{
-            grid-column:2; grid-row:1 / span 2;
-            overflow-x:auto;
-            overflow-y:hidden;
-            -webkit-overflow-scrolling: touch;
-          }}
-          .canvas {{
-            position:relative;
-            width:{plot_w}px;
-            height:{TOP_H + plot_h}px;
-          }}
-          .xaxis {{
-            position:sticky;
-            top:0;
-            height:{TOP_H}px;
-            background: rgba(255,255,255,0.98);
-            border-bottom:1px solid #eee;
-            z-index:10;
-          }}
-          .xtick {{
-            position:absolute;
-            bottom:6px;
-            transform: translateX(-50%);
-            font-size:12px;
-            color:#444;
-            white-space:nowrap;
-          }}
-          .xminor {{
-            position:absolute;
-            top:0;
-            width:1px;
-            height:{TOP_H}px;
-            background:#f0f0f0;
-          }}
-          .vline {{
-            position:absolute;
-            left:0;
-            top:{TOP_H}px;
-            width:1px;
-            height:{plot_h}px;
-            background:#f0f0f0;
-            z-index:2;
-          }}
-          .vline.month {{
-            background:#d9d9d9;
-          }}
-          .hline {{
-            position:absolute;
-            left:0;
-            top:0;
-            width:{plot_w}px;
-            height:1px;
-            background:#f3f3f3;
-            z-index:1;
-          }}
-          .plot {{
-            position:absolute;
-            left:0;
-            top:{TOP_H}px;
-            width:{plot_w}px;
-            height:{plot_h}px;
-            z-index:5;
-          }}
-          .dot {{
-            position:absolute;
-            transform: translate(-50%, -50%);
-            overflow: visible;
-            pointer-events:auto;
-          }}
-        </style>
-        """
-
-        # ---- HTML ----
-        html = "<div class='xywrap'>"
-        html += "<div class='xyframe'>"
-        html += "<div class='corner'></div>"
-
-        # 左（固定）Area
-        html += "<div class='ylabels'>"
-        for a in areas_all:
-            html += f"<div class='ylabel'>{_html.escape(str(a))}</div>"
-        html += "</div>"
-
-        # 右（スクロール）
-        html += "<div class='xscroll'>"
-        html += "<div class='canvas'>"
-
-        # 上（日付行＝常時表示）
-        html += "<div class='xaxis'>"
-        for i, m, show in x_labels:
-            x = i * X_STEP + X_STEP
-            html += f"<div class='xminor' style='left:{x}px;'></div>"
-            if show:
-                html += f"<div class='xtick' style='left:{x}px;'>{m:%m/%d}</div>"
-        html += "</div>"
-
-        # 縦線
-        for i in range(n_x):
-            x = i * X_STEP + X_STEP
-            cls = "vline month" if i in month_lines else "vline"
-            html += f"<div class='{cls}' style='left:{x}px;'></div>"
-
-        # 横線
-        for j in range(n_y + 1):
-            y = j * ROW_H
-            html += f"<div class='hline' style='top:{TOP_H + y}px;'></div>"
-
-        # 点
-        html += "<div class='plot'>"
-        area_to_y = {a: (i * ROW_H + ROW_H / 2) for i, a in enumerate(areas_all)}
-        for area, dt, x, svg, hover in points:
-            if area not in area_to_y:
-                continue
-            y = area_to_y[area]
-            key = (area, pd.Timestamp(dt).date())
-            k = jitter_counter.get(key, 0)
-            jitter_counter[key] = k + 1
-            if k == 0:
-                xj = x
-            else:
-                step = 4 * (k // 2 + 1)
-                sign = 1 if (k % 2 == 0) else -1
-                xj = x + sign * step
-            safe_tip = _html.escape(hover, quote=True)
-            html += f"<div class='dot' title='{safe_tip}' style='left:{xj:.1f}px; top:{y}px;'>{svg}</div>"
-        html += "</div>"  # plot
-
-        html += "</div>"  # canvas
-        html += "</div>"  # xscroll
-
-        html += "</div>"  # xyframe
-
-        # 凡例（表の直下、iframe内）
-        html += legend_html
-
-        html += "</div>"  # xywrap
-
-        iframe_h = max(420, min(1100, TOP_H + plot_h + 110))
-
-        st.components.v1.html(
-            f"<!doctype html><html><head><meta charset='utf-8'>{css}</head><body>{html}</body></html>",
-            height=iframe_h,
-            scrolling=False
+    # ============================================================
+    # 比較タブ：差分中心は「基準と比較が揃う点だけ」
+    #         GSI比較は中心数字なし
+    # ============================================================
+    with tab_cmp:
+        base_df = df_gsi if mode == "GSI" else df_larv
+        weeks_all = sorted(
+            base_df[base_df["ISOYear"] == int(base_year)]["week"].dropna().astype(int).unique().tolist()
         )
+        if not weeks_all:
+            st.info("基準年に週データがありません。")
+            return
 
-    _render_xy()
+        mondays = [datetime.fromisocalendar(int(base_year), int(w), 1) for w in weeks_all]
+        week_to_idx = {w: i for i, w in enumerate(weeks_all)}
+        data_mode = "週集計"
+
+        CMP_SIZE = 54
+        points = []
+
+        if mode == "GSI":
+            agg = _weekly_gsi_sum(df_gsi)
+            base = agg[agg["ISOYear"] == int(base_year)].copy()
+            bmap = {(str(r["Area"]).strip(), int(r["week"])): r for _, r in base.iterrows()}
+
+            cmap = {}
+            if comp_years:
+                comp_raw = agg[agg["ISOYear"].isin([int(y) for y in comp_years])].copy()
+                comp = comp_raw.groupby(["Area","week"], as_index=False)[["ge25","mid","lt20","n"]].mean()
+                cmap = {(str(r["Area"]).strip(), int(r["week"])): r for _, r in comp.iterrows()}
+
+            for (area, w), br in bmap.items():
+                if w not in week_to_idx:
+                    continue
+                dt = pd.Timestamp(datetime.fromisocalendar(int(base_year), int(w), 1))
+                hover = f"{dt:%Y-%m-%d}"
+
+                b_ge25 = float(br["ge25"]); b_mid = float(br["mid"]); b_lt20 = float(br["lt20"])
+
+                cr = cmap.get((area, w), None)
+                if cr is None:
+                    c_ge25 = c_mid = c_lt20 = 0.0
+                    draw_ring = False
+                else:
+                    c_ge25 = float(cr["ge25"]); c_mid = float(cr["mid"]); c_lt20 = float(cr["lt20"])
+                    draw_ring = True
+
+                # ★GSI比較：中心数字なし
+                center_txt = None
+
+                svg = svg_ring_with_pie_core(
+                    core_values=[b_ge25, b_mid, b_lt20],
+                    ring_values=[c_ge25, c_mid, c_lt20],
+                    colors=colors_gsi,
+                    size=CMP_SIZE,
+                    labels=["≥25","20–24.9","<20"],
+                    core_alpha=0.92,
+                    ring_alpha=0.25,
+                    center_text=center_txt,
+                    hover_text=hover,
+                    draw_ring=draw_ring,
+                    core_stroke_width=3,
+                    ring_stroke_width=2,
+                )
+                if svg:
+                    points.append((area, dt, svg, hover))
+
+            legend_html = """
+            <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:13px;">
+              <div style="font-weight:700;">凡例（GSI）</div>
+              <div style="color:#666;">基準=円 / 比較=外リング（中心数字なし）</div>
+              <div><span style="display:inline-block;width:12px;height:12px;background:#d62728;margin-right:6px;border:1px solid #fff;"></span>≥25</div>
+              <div><span style="display:inline-block;width:12px;height:12px;background:#ff7f0e;margin-right:6px;border:1px solid #fff;"></span>20–24.9</div>
+              <div><span style="display:inline-block;width:12px;height:12px;background:#1f77b4;margin-right:6px;border:1px solid #fff;"></span>&lt;20</div>
+            </div>
+            """
+            _render_xy(points, mondays, week_to_idx, data_mode, legend_html)
+
+        else:
+            wk = _weekly_larvae_mean(df_larv)
+            base = wk[wk["ISOYear"] == int(base_year)].copy()
+            bmap = {(str(r["Area"]).strip(), int(r["week"])): r for _, r in base.iterrows()}
+
+            cmap = {}
+            if comp_years:
+                comp_raw = wk[wk["ISOYear"].isin([int(y) for y in comp_years])].copy()
+                comp = comp_raw.groupby(["Area","week"], as_index=False)[["lt200","mid","ge260","total"]].mean()
+                cmap = {(str(r["Area"]).strip(), int(r["week"])): r for _, r in comp.iterrows()}
+
+            for (area, w), br in bmap.items():
+                if w not in week_to_idx:
+                    continue
+                dt = pd.Timestamp(datetime.fromisocalendar(int(base_year), int(w), 1))
+                hover = f"{dt:%Y-%m-%d}"
+
+                b_lt200 = float(br["lt200"]); b_mid = float(br["mid"]); b_ge260 = float(br["ge260"])
+                b_total = float(br["total"])
+                if (not np.isfinite(b_total)) or b_total <= 0:
+                    continue
+
+                cr = cmap.get((area, w), None)
+                if cr is None:
+                    c_lt200 = c_mid = c_ge260 = 0.0
+                    c_total = np.nan
+                    draw_ring = False
+                else:
+                    c_lt200 = float(cr["lt200"]); c_mid = float(cr["mid"]); c_ge260 = float(cr["ge260"])
+                    c_total = float(cr["total"])
+                    draw_ring = True
+
+                # ★差分（中心）は「基準と比較が揃う点だけ」
+                if draw_ring and np.isfinite(c_total):
+                    d_total = b_total - c_total
+                    center_txt = f"{d_total:+.0f}"
+                else:
+                    center_txt = None
+
+                svg = svg_ring_with_pie_core(
+                    core_values=[b_lt200, b_mid, b_ge260],
+                    ring_values=[c_lt200, c_mid, c_ge260],
+                    colors=colors_larvae,
+                    size=CMP_SIZE,
+                    labels=["<200","200–259","≥260"],
+                    core_alpha=0.92,
+                    ring_alpha=0.25,
+                    center_text=center_txt,
+                    hover_text=hover,
+                    draw_ring=draw_ring,
+                    core_stroke_width=3,
+                    ring_stroke_width=2,
+                )
+                if svg:
+                    points.append((area, dt, svg, hover))
+
+            legend_html = """
+            <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:13px;">
+              <div style="font-weight:700;">凡例（ラーバ）</div>
+              <div style="color:#666;">中心=Δtotal（基準−比較平均：両方ある点のみ） / 比較=外リング</div>
+              <div><span style="display:inline-block;width:12px;height:12px;background:#d62728;margin-right:6px;border:1px solid #fff;"></span>≥260</div>
+              <div><span style="display:inline-block;width:12px;height:12px;background:#ff7f0e;margin-right:6px;border:1px solid #fff;"></span>200–259</div>
+              <div><span style="display:inline-block;width:12px;height:12px;background:#1f77b4;margin-right:6px;border:1px solid #fff;"></span>&lt;200</div>
+            </div>
+            """
+            _render_xy(points, mondays, week_to_idx, data_mode, legend_html)
 
 
 def reset_sidebar_state_for(prefix_keep: str):
@@ -3360,29 +3666,40 @@ def reset_sidebar_state_for(prefix_keep: str):
             except KeyError:
                 pass
 
+
 def main():
-    require_password_gate()
+    import streamlit as st
+
     try:
         inject_compact_css()
     except Exception:
         pass
+
+    OPTIONS = ["ガイダンス", "水温図", "CMEM", "テスト", "ラーバ", "経年比較"]
+
+    if "main_mode_value" not in st.session_state:
+        st.session_state["main_mode_value"] = "ガイダンス"
+
     try:
         mode = st.segmented_control(
-            '',
-            options=["ガイダンス", "水温図", "CMEM", "テスト", "ラーバ", "経年比較"],
-            key="main_mode",
-            default="ガイダンス",
-            label_visibility="collapsed"
+            "",
+            options=OPTIONS,
+            key="main_mode_seg",
+            default=st.session_state["main_mode_value"],
+            label_visibility="collapsed",
         )
     except Exception:
+        idx = OPTIONS.index(st.session_state["main_mode_value"]) if st.session_state["main_mode_value"] in OPTIONS else 0
         mode = st.radio(
-            '',
-            options=["ガイダンス", "水温図", "CMEM", "テスト", "ラーバ", "経年比較"],
-            index=0,
+            "",
+            options=OPTIONS,
+            index=idx,
             horizontal=True,
-            key="main_mode",
-            label_visibility="collapsed"
+            key="main_mode_radio",
+            label_visibility="collapsed",
         )
+
+    st.session_state["main_mode_value"] = mode
 
     sel_areas = None
     with st.sidebar:
@@ -3391,26 +3708,22 @@ def main():
     if mode == "水温図":
         reset_sidebar_state_for('water_')
         render_water_mode()
-
     elif mode == "CMEM":
         reset_sidebar_state_for('cmem_')
         render_cmem_mode()
-
     elif mode == "ラーバ":
         reset_sidebar_state_for('larv_')
         render_larvae_mode(sel_areas)
-
     elif mode == "経年比較":
         reset_sidebar_state_for('yc_')
         render_yearly_compare_mode()
-
     elif mode == "テスト":
         reset_sidebar_state_for('map_')
         render_map_mode()
-
-    else:  # "ガイダンス"
+    else:
         reset_sidebar_state_for('cal_')
         render_calendar_mode()
+
 
 if __name__ == "__main__":
     main()
