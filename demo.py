@@ -2770,9 +2770,6 @@ def render_map_mode():
     GSI_FILE    = MATURITY_PATH
     LARVAE_FILE = LARVAE_PATH
 
-    # -------------------------
-    # CSV読み込み（保険）
-    # -------------------------
     def _read(path):
         for enc in ("utf-8", "utf-8-sig", "cp932"):
             try:
@@ -2796,9 +2793,6 @@ def render_map_mode():
         st.warning("file_summary.csv / maturity.csv / larvae.csv を配置してください。")
         return
 
-    # -------------------------
-    # 前処理
-    # -------------------------
     df_area["Area"] = df_area.get("Area", "").astype(str).str.strip()
     for col in ["Laf", "Lof"]:
         if col in df_area.columns:
@@ -2834,11 +2828,6 @@ def render_map_mode():
         st.info("年度データがありません。")
         return
 
-    # ============================================================
-    # UI（上）：モード / 基準年 / 通常データ / 比較年
-    #   - 基準年はここ1か所のみ
-    #   - 通常/比較はタブ
-    # ============================================================
     c0, c1, c2, c3 = st.columns([1.2, 1.0, 1.2, 2.0])
 
     with c0:
@@ -2861,6 +2850,7 @@ def render_map_mode():
         )
 
     with c2:
+        # ラーバ通常デフォルト=週集計
         norm_data_mode = st.radio(
             "",
             ["生データ", "週集計"],
@@ -2887,6 +2877,8 @@ def render_map_mode():
     colors_gsi    = ["#d62728", "#ff7f0e", "#1f77b4"]  # ≥25 / 20–24.9 / <20
     colors_larvae = ["#1f77b4", "#ff7f0e", "#d62728"]  # <200 / 200–259 / ≥260
 
+    EMPH_GSI_IDX = [2]       # values=[ge25, mid, lt20] の lt20
+    EMPH_LARV_IDX = [1, 2]   # values=[lt200, mid, ge260] の mid, ge260
 
     def _hex_to_rgb(h: str):
         h = (h or "").lstrip("#")
@@ -2941,13 +2933,20 @@ def render_map_mode():
 
         return f"M{cx},{cy} L{x1},{y1} A{r},{r} 0 {large},1 {x2},{y2} Z"
 
-    def svg_pie(values, colors, size=60, labels=None, alpha=0.60, center_text=None, hover_text=None,
-                stroke_width=2):
+    def svg_pie(
+        values, colors, size=60, labels=None, alpha=0.60, center_text=None, hover_text=None,
+        stroke_width=2,
+        emphasize_idxs=None,
+        emphasize_alpha_boost=0.0,
+        emphasize_stroke="rgba(0,0,0,0.35)",
+        emphasize_stroke_width=2.0
+    ):
         """単一円（通常用）: total<=0 なら空文字（数字だけ出る事故を防ぐ）"""
         total = float(np.nansum(values))
         if (not np.isfinite(total)) or total <= 0:
             return ""
 
+        emphasize_set = set(emphasize_idxs or [])
         cx, cy, r = size / 2, size / 2, size / 2 - 2
         hover_text = (hover_text or "").strip()
 
@@ -2969,18 +2968,24 @@ def render_map_mode():
                 f"{_html.escape(s)}</text>"
             )
 
-        # ★追加：非ゼロが1つだけ（100%）なら circle で描く（弧の不具合回避）
+        def _slice_style(i, base_alpha):
+            if i in emphasize_set:
+                a = min(1.0, float(base_alpha) + float(emphasize_alpha_boost))
+                return a, emphasize_stroke, float(emphasize_stroke_width)
+            return float(base_alpha), "rgba(255,255,255,0.90)", float(stroke_width)
+
         nonzeros = [(i, float(v)) for i, v in enumerate(values)
                     if (v is not None and np.isfinite(v) and float(v) > 1e-12)]
         if len(nonzeros) == 1:
             i, v = nonzeros[0]
             c = colors[i] if colors and i < len(colors) else "#888888"
-            fill = _hex_to_rgba(c, alpha) if isinstance(c, str) and c.startswith("#") else c
+            a, stc, stw = _slice_style(i, alpha)
+            fill = _hex_to_rgba(c, a) if isinstance(c, str) and c.startswith("#") else c
 
             svg = f"<svg width='{size}' height='{size}' viewBox='0 0 {size} {size}'>"
             svg += (
                 f"<circle cx='{cx}' cy='{cy}' r='{r}' fill='{fill}' "
-                f"stroke='rgba(255,255,255,0.90)' stroke-width='{stroke_width}'>"
+                f"stroke='{stc}' stroke-width='{stw}'>"
                 f"<title>{_html.escape(_title(i, v))}</title></circle>"
             )
             ct = _center_text_svg()
@@ -2999,9 +3004,10 @@ def render_map_mode():
             ang = (v / total) * 360.0
             end = start + ang
             c = colors[i] if colors and i < len(colors) else "#888888"
-            fill = _hex_to_rgba(c, alpha) if isinstance(c, str) and c.startswith("#") else c
+            a, stc, stw = _slice_style(i, alpha)
+            fill = _hex_to_rgba(c, a) if isinstance(c, str) and c.startswith("#") else c
             d = _pie_wedge_path(cx, cy, r, start, end)
-            svg += f"<path d='{d}' fill='{fill}' stroke='rgba(255,255,255,0.90)' stroke-width='{stroke_width}'>"
+            svg += f"<path d='{d}' fill='{fill}' stroke='{stc}' stroke-width='{stw}'>"
             svg += f"<title>{_html.escape(_title(i, v))}</title></path>"
             start = end
 
@@ -3017,7 +3023,12 @@ def render_map_mode():
         center_text=None, hover_text=None,
         draw_ring=True,
         core_stroke_width=3,
-        ring_stroke_width=2
+        ring_stroke_width=2,
+        emphasize_core_idxs=None,
+        emphasize_ring_idxs=None,
+        emphasize_alpha_boost=0.0,
+        emphasize_stroke="rgba(0,0,0,0.35)",
+        emphasize_stroke_width=2.0
     ):
         """
         比較用:
@@ -3032,6 +3043,9 @@ def render_map_mode():
             return ""  # 「数字だけ」を防ぐ
 
         hover_text = (hover_text or "").strip()
+        emph_core = set(emphasize_core_idxs or [])
+        emph_ring = set(emphasize_ring_idxs or [])
+
         cx, cy = size / 2, size / 2
 
         r_out = size / 2 - 2
@@ -3060,6 +3074,12 @@ def render_map_mode():
                 f"{_html.escape(s)}</text>"
             )
 
+        def _slice_style(i, base_alpha, is_emph: bool):
+            if is_emph:
+                a = min(1.0, float(base_alpha) + float(emphasize_alpha_boost))
+                return a, emphasize_stroke, float(emphasize_stroke_width)
+            return float(base_alpha), None, None
+
         def _draw_ring(values):
             if not draw_ring:
                 return ""
@@ -3067,20 +3087,27 @@ def render_map_mode():
             if (not np.isfinite(total)) or total <= 0:
                 return ""
 
-            # ★追加：リングが単一カテゴリ100%なら「太いstroke円」で描く
+            # ★リングが単一カテゴリ100%なら「太いstroke円」で描く（強調も対応）
             nonz = [(i, float(v)) for i, v in enumerate(values)
                     if (v is not None and np.isfinite(v) and float(v) > 1e-12)]
             if len(nonz) == 1:
                 i, v = nonz[0]
                 c = colors[i] if colors and i < len(colors) else "#888888"
-                stroke_col = _hex_to_rgba(c, ring_alpha) if isinstance(c, str) and c.startswith("#") else c
+                a, stc, stw = _slice_style(i, ring_alpha, (i in emph_ring))
+                stroke_col = _hex_to_rgba(c, a) if isinstance(c, str) and c.startswith("#") else c
                 r_mid = (r_out + r_ring_in) / 2.0
                 w_ring = (r_out - r_ring_in)
-                return (
+                svg = (
                     f"<circle cx='{cx}' cy='{cy}' r='{r_mid}' fill='none' "
                     f"stroke='{stroke_col}' stroke-width='{w_ring}' stroke-linecap='butt'>"
                     f"<title>{_html.escape(_title(i, v))}</title></circle>"
                 )
+                if i in emph_ring:
+                    svg += (
+                        f"<circle cx='{cx}' cy='{cy}' r='{r_mid}' fill='none' "
+                        f"stroke='{stc}' stroke-width='{max(2.4, float(stw))}' stroke-linecap='round' />"
+                    )
+                return svg
 
             parts = []
             start = 0.0
@@ -3092,10 +3119,19 @@ def render_map_mode():
                 ang = (v / total) * 360.0
                 end = start + ang
                 c = colors[i] if colors and i < len(colors) else "#888888"
-                fill = _hex_to_rgba(c, ring_alpha) if isinstance(c, str) and c.startswith("#") else c
+                a, stc, stw = _slice_style(i, ring_alpha, (i in emph_ring))
+                fill = _hex_to_rgba(c, a) if isinstance(c, str) and c.startswith("#") else c
                 d = _donut_sector_path(cx, cy, r_out, r_ring_in, start, end)
+
+                if i in emph_ring:
+                    use_stroke = stc
+                    use_stw = stw
+                else:
+                    use_stroke = "rgba(255,255,255,0.90)"
+                    use_stw = ring_stroke_width
+
                 parts.append(
-                    f"<path d='{d}' fill='{fill}' stroke='rgba(255,255,255,0.90)' stroke-width='{ring_stroke_width}'>"
+                    f"<path d='{d}' fill='{fill}' stroke='{use_stroke}' stroke-width='{use_stw}'>"
                     f"<title>{_html.escape(_title(i, v))}</title></path>"
                 )
                 start = end
@@ -3106,16 +3142,25 @@ def render_map_mode():
             if (not np.isfinite(total)) or total <= 0:
                 return ""
 
-            # ★追加：コアが単一カテゴリ100%なら circle で描く
+            # ★コアが単一カテゴリ100%なら circle で描く（強調も対応）
             nonz = [(i, float(v)) for i, v in enumerate(values)
                     if (v is not None and np.isfinite(v) and float(v) > 1e-12)]
             if len(nonz) == 1:
                 i, v = nonz[0]
                 c = colors[i] if colors and i < len(colors) else "#888888"
-                fill = _hex_to_rgba(c, core_alpha) if isinstance(c, str) and c.startswith("#") else c
+                a, stc, stw = _slice_style(i, core_alpha, (i in emph_core))
+                fill = _hex_to_rgba(c, a) if isinstance(c, str) and c.startswith("#") else c
+
+                if i in emph_core:
+                    stroke = stc
+                    sw = stw
+                else:
+                    stroke = "rgba(255,255,255,0.95)"
+                    sw = core_stroke_width
+
                 return (
                     f"<circle cx='{cx}' cy='{cy}' r='{r_core}' fill='{fill}' "
-                    f"stroke='rgba(255,255,255,0.95)' stroke-width='{core_stroke_width}'>"
+                    f"stroke='{stroke}' stroke-width='{sw}'>"
                     f"<title>{_html.escape(_title(i, v))}</title></circle>"
                 )
 
@@ -3129,10 +3174,19 @@ def render_map_mode():
                 ang = (v / total) * 360.0
                 end = start + ang
                 c = colors[i] if colors and i < len(colors) else "#888888"
-                fill = _hex_to_rgba(c, core_alpha) if isinstance(c, str) and c.startswith("#") else c
+                a, stc, stw = _slice_style(i, core_alpha, (i in emph_core))
+                fill = _hex_to_rgba(c, a) if isinstance(c, str) and c.startswith("#") else c
                 d = _pie_wedge_path(cx, cy, r_core, start, end)
+
+                if i in emph_core:
+                    use_stroke = stc
+                    use_stw = stw
+                else:
+                    use_stroke = "rgba(255,255,255,0.95)"
+                    use_stw = core_stroke_width
+
                 parts.append(
-                    f"<path d='{d}' fill='{fill}' stroke='rgba(255,255,255,0.95)' stroke-width='{core_stroke_width}'>"
+                    f"<path d='{d}' fill='{fill}' stroke='{use_stroke}' stroke-width='{use_stw}'>"
                     f"<title>{_html.escape(_title(i, v))}</title></path>"
                 )
                 start = end
@@ -3146,7 +3200,6 @@ def render_map_mode():
             svg += ct
         svg += "</svg>"
         return svg
-
 
     def _areas_sorted():
         tmp = df_area.copy()
@@ -3301,7 +3354,6 @@ def render_map_mode():
         out = d.groupby(["Area", "ISOYear", "week"], as_index=False)[["ge25","mid","lt20","n"]].sum()
         return out
 
-
     def _weekly_larvae_mean(df):
         d = df.copy()
         d = d.dropna(subset=["Date", "Area", "ISOYear", "week"])
@@ -3329,7 +3381,6 @@ def render_map_mode():
             .mean()
         )
         return out
-
 
     with tab_norm:
         base_df = df_gsi if mode == "GSI" else df_larv
@@ -3364,9 +3415,12 @@ def render_map_mode():
                     if tot <= 0:
                         continue
                     hover = f"{pd.Timestamp(dt):%Y-%m-%d}"
-                    svg = svg_pie([n_ge25, n_mid, n_lt20], colors_gsi, size=50,
-                                  labels=["≥25","20–24.9","<20"], alpha=0.60,
-                                  center_text=None, hover_text=hover, stroke_width=2)
+                    svg = svg_pie(
+                        [n_ge25, n_mid, n_lt20], colors_gsi, size=50,
+                        labels=["≥25","20–24.9","<20"], alpha=0.60,
+                        center_text=None, hover_text=hover, stroke_width=2,
+                        emphasize_idxs=EMPH_GSI_IDX
+                    )
                     if svg:
                         points.append((area, pd.Timestamp(dt), svg, hover))
             else:
@@ -3385,15 +3439,19 @@ def render_map_mode():
                         continue
                     dt = pd.Timestamp(datetime.fromisocalendar(int(base_year), int(w), 1))
                     hover = f"{dt:%Y-%m-%d}"
-                    svg = svg_pie([n_ge25, n_mid, n_lt20], colors_gsi, size=50,
-                                  labels=["≥25","20–24.9","<20"], alpha=0.60,
-                                  center_text=None, hover_text=hover, stroke_width=2)
+                    svg = svg_pie(
+                        [n_ge25, n_mid, n_lt20], colors_gsi, size=50,
+                        labels=["≥25","20–24.9","<20"], alpha=0.60,
+                        center_text=None, hover_text=hover, stroke_width=2,
+                        emphasize_idxs=EMPH_GSI_IDX
+                    )
                     if svg:
                         points.append((area, dt, svg, hover))
 
             legend_html = """
             <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:13px;">
               <div style="font-weight:700;">凡例（GSI）</div>
+              <div style="color:#666;">注目：&lt;20 を強調（太枠+濃色）</div>
               <div><span style="display:inline-block;width:12px;height:12px;background:#d62728;margin-right:6px;border:1px solid #fff;"></span>≥25</div>
               <div><span style="display:inline-block;width:12px;height:12px;background:#ff7f0e;margin-right:6px;border:1px solid #fff;"></span>20–24.9</div>
               <div><span style="display:inline-block;width:12px;height:12px;background:#1f77b4;margin-right:6px;border:1px solid #fff;"></span>&lt;20</div>
@@ -3446,9 +3504,12 @@ def render_map_mode():
                     size = size_from_total(total)
                     center_txt = str(int(round(total)))  # ★常に表示
                     hover = f"{pd.Timestamp(dt):%Y-%m-%d}"
-                    svg = svg_pie([lt200, mid, ge260], colors_larvae, size=size,
-                                  labels=["<200","200–259","≥260"], alpha=0.55,
-                                  center_text=center_txt, hover_text=hover, stroke_width=2)
+                    svg = svg_pie(
+                        [lt200, mid, ge260], colors_larvae, size=size,
+                        labels=["<200","200–259","≥260"], alpha=0.55,
+                        center_text=center_txt, hover_text=hover, stroke_width=2,
+                        emphasize_idxs=EMPH_LARV_IDX
+                    )
                     if svg:
                         points.append((area, pd.Timestamp(dt), svg, hover))
 
@@ -3479,15 +3540,19 @@ def render_map_mode():
                     size = size_from_total(total)
                     center_txt = str(int(round(total)))  # ★常に表示（週平均の整数）
                     hover = f"{dt:%Y-%m-%d}"
-                    svg = svg_pie([lt200, mid, ge260], colors_larvae, size=size,
-                                  labels=["<200","200–259","≥260"], alpha=0.55,
-                                  center_text=center_txt, hover_text=hover, stroke_width=2)
+                    svg = svg_pie(
+                        [lt200, mid, ge260], colors_larvae, size=size,
+                        labels=["<200","200–259","≥260"], alpha=0.55,
+                        center_text=center_txt, hover_text=hover, stroke_width=2,
+                        emphasize_idxs=EMPH_LARV_IDX
+                    )
                     if svg:
                         points.append((area, dt, svg, hover))
 
             legend_html = """
             <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:13px;">
               <div style="font-weight:700;">凡例（ラーバ）</div>
+              <div style="color:#666;">注目：200–259 と ≥260 を強調（太枠+濃色）</div>
               <div><span style="display:inline-block;width:12px;height:12px;background:#d62728;margin-right:6px;border:1px solid #fff;"></span>≥260</div>
               <div><span style="display:inline-block;width:12px;height:12px;background:#ff7f0e;margin-right:6px;border:1px solid #fff;"></span>200–259</div>
               <div><span style="display:inline-block;width:12px;height:12px;background:#1f77b4;margin-right:6px;border:1px solid #fff;"></span>&lt;200</div>
@@ -3538,9 +3603,6 @@ def render_map_mode():
                     c_ge25 = float(cr["ge25"]); c_mid = float(cr["mid"]); c_lt20 = float(cr["lt20"])
                     draw_ring = True
 
-                # ★GSI比較：中心数字なし
-                center_txt = None
-
                 svg = svg_ring_with_pie_core(
                     core_values=[b_ge25, b_mid, b_lt20],
                     ring_values=[c_ge25, c_mid, c_lt20],
@@ -3549,11 +3611,13 @@ def render_map_mode():
                     labels=["≥25","20–24.9","<20"],
                     core_alpha=0.92,
                     ring_alpha=0.25,
-                    center_text=center_txt,
+                    center_text=None,
                     hover_text=hover,
                     draw_ring=draw_ring,
                     core_stroke_width=3,
                     ring_stroke_width=2,
+                    emphasize_core_idxs=EMPH_GSI_IDX,
+                    emphasize_ring_idxs=EMPH_GSI_IDX
                 )
                 if svg:
                     points.append((area, dt, svg, hover))
@@ -3561,7 +3625,7 @@ def render_map_mode():
             legend_html = """
             <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:13px;">
               <div style="font-weight:700;">凡例（GSI）</div>
-              <div style="color:#666;">基準=円 / 比較=外リング（中心数字なし）</div>
+              <div style="color:#666;">基準=円 / 比較=外リング（注目：&lt;20 を強調）</div>
               <div><span style="display:inline-block;width:12px;height:12px;background:#d62728;margin-right:6px;border:1px solid #fff;"></span>≥25</div>
               <div><span style="display:inline-block;width:12px;height:12px;background:#ff7f0e;margin-right:6px;border:1px solid #fff;"></span>20–24.9</div>
               <div><span style="display:inline-block;width:12px;height:12px;background:#1f77b4;margin-right:6px;border:1px solid #fff;"></span>&lt;20</div>
@@ -3621,6 +3685,8 @@ def render_map_mode():
                     draw_ring=draw_ring,
                     core_stroke_width=3,
                     ring_stroke_width=2,
+                    emphasize_core_idxs=EMPH_LARV_IDX,
+                    emphasize_ring_idxs=EMPH_LARV_IDX
                 )
                 if svg:
                     points.append((area, dt, svg, hover))
@@ -3628,7 +3694,7 @@ def render_map_mode():
             legend_html = """
             <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:13px;">
               <div style="font-weight:700;">凡例（ラーバ）</div>
-              <div style="color:#666;">中心=Δtotal（基準−比較平均：両方ある点のみ） / 比較=外リング</div>
+              <div style="color:#666;">中心=Δtotal（基準−比較平均：両方ある点のみ） / 比較=外リング（注目：200–259, ≥260 を強調）</div>
               <div><span style="display:inline-block;width:12px;height:12px;background:#d62728;margin-right:6px;border:1px solid #fff;"></span>≥260</div>
               <div><span style="display:inline-block;width:12px;height:12px;background:#ff7f0e;margin-right:6px;border:1px solid #fff;"></span>200–259</div>
               <div><span style="display:inline-block;width:12px;height:12px;background:#1f77b4;margin-right:6px;border:1px solid #fff;"></span>&lt;200</div>
