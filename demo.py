@@ -2286,8 +2286,8 @@ def render_cmem_mode():
                 fig.add_trace(tr, row=r, col=1)
                 fig.update_yaxes(autorange='reversed', title_text="水深 (m)", row=r, col=1)
 
-            
             # --- MY / ANFC 境界線（Source列がある日付/年月で切替が起きる場所に縦線） ---
+
             def _cmem_boundary_x(df_a: pd.DataFrame, df_b: pd.DataFrame) -> List[pd.Timestamp]:
                 if (df_a is None) and (df_b is None):
                     return []
@@ -2318,7 +2318,6 @@ def render_cmem_mode():
                     return []
                 xs = g['_t'].tolist()
                 flags = g['_anfc'].tolist()
-                # 境界（状態が切り替わる点）だけを抽出
                 out = []
                 for i in range(1, len(xs)):
                     if flags[i] != flags[i - 1]:
@@ -2330,30 +2329,15 @@ def render_cmem_mode():
                 for bx in boundary_x:
                     for rr in range(1, rows + 1):
                         try:
-                            fig.add_vline(
-                                x=bx, row=rr, col=1,
-                                line_width=6, line_dash='solid',
-                                line_color='white', opacity=0.75
-                            )
-                            fig.add_vline(
-                                x=bx, row=rr, col=1,
-                                line_width=2, line_dash='dot',
-                                line_color='black', opacity=0.85
-                            )
+                            fig.add_vline(x=bx, row=rr, col=1, line_width=6, line_dash='solid', line_color='white', opacity=0.75)
+                            fig.add_vline(x=bx, row=rr, col=1, line_width=2, line_dash='dot', line_color='black', opacity=0.85)
                         except Exception:
-                            fig.add_shape(
-                                type='line', x0=bx, x1=bx, y0=0, y1=1,
-                                xref='x', yref='paper',
-                                line=dict(color='white', width=6, dash='solid'),
-                                opacity=0.75
-                            )
-                            fig.add_shape(
-                                type='line', x0=bx, x1=bx, y0=0, y1=1,
-                                xref='x', yref='paper',
-                                line=dict(color='black', width=2, dash='dot'),
-                                opacity=0.85
-                            )
-title_suffix = "（時系列・月平均）" if cmem_period == "月別" else "（時系列・日別）"
+                            fig.add_shape(type='line', x0=bx, x1=bx, y0=0, y1=1, xref='x', yref='paper',
+                                          line=dict(color='white', width=6, dash='solid'), opacity=0.75)
+                            fig.add_shape(type='line', x0=bx, x1=bx, y0=0, y1=1, xref='x', yref='paper',
+                                          line=dict(color='black', width=2, dash='dot'), opacity=0.85)
+
+            title_suffix = "（時系列・月平均）" if cmem_period == "月別" else "（時系列・日別）"
             fig.update_layout(
                 title={"text": f"CMEM {sel_site}{title_suffix}", "y": 0.98, "x": 0.01, "xanchor": "left", "font": {"size": 16}},
                 margin=dict(l=10, r=120, t=70, b=10),
@@ -2602,6 +2586,7 @@ def render_calendar_mode():
 
     selected_file = st.selectbox("対象エリアを選択", sorted(pred_files), key='cal_selected_file', label_visibility="collapsed")
 
+    # 指紋（キャッシュキー）
     pred_path = pjoin(BASE_DIR, PRED_DIR, selected_file)
     name, ext = os.path.splitext(selected_file)
     corr_path = pjoin(BASE_DIR, CORR_DIR, f"{name}_corr{ext}")
@@ -2610,6 +2595,7 @@ def render_calendar_mode():
     fp_corr = file_fingerprint(corr_path)
     fp_obs  = file_fingerprint(obs_path)
 
+    # 読み込み
     df_pred = load_pred(selected_file, fp_pred)
     df_corr = load_corr_for(selected_file, fp_corr)
     df_obs  = load_obs_for(selected_file, fp_obs)
@@ -2619,6 +2605,7 @@ def render_calendar_mode():
         st.warning("予測データが読み込めませんでした")
         st.stop()
 
+    # UI（wt_test 準拠）
     today_jst = pd.Timestamp.now(tz="Asia/Tokyo").date()
     latest_day = df_pred["date_day"].max()
     available_days = sorted(df_pred["date_day"].unique())
@@ -2637,6 +2624,7 @@ def render_calendar_mode():
             label_visibility='collapsed'
         )
 
+    # ===== 週間（昼頃） =====
     if cal_choice == "週間表示":
         base_day_week = min(max(today_jst, min_day), max_day)
         selected_day = st.date_input(
@@ -2655,10 +2643,12 @@ def render_calendar_mode():
         day_list = list(pd.date_range(start_day, end_day, freq='D'))
         df_period = df_pred[df_pred["date_day"].isin([d.date() for d in day_list])].copy()
 
+        # corr 付与
         if corr_available:
             df_corr_period = df_corr[df_corr["date_day"].isin([d.date() for d in day_list])].copy()
             df_period = add_corr(df_period, df_corr_period)
 
+        # obs 温度（週コメント判定用）
         if (not df_obs.empty) and (not df_period.empty):
             df_obs_week = df_obs[df_obs["date_day"].between(day_list[0].date(), day_list[-1].date())].copy()
             tol_obs = pd.Timedelta(minutes=OBS_MATCH_TOL_MIN)
@@ -2670,6 +2660,7 @@ def render_calendar_mode():
             )
 
         depths_all = sorted([int(d) for d in df_pred["depth_m"].dropna().unique()])
+        # 週コメント（表層/中層/底層）
 
         with st.expander(f'コメント（{start_day:%m/%d}～{end_day:%m/%d}の推移）', expanded=False):
                     layers = make_layer_groups(depths_all)
@@ -2907,6 +2898,7 @@ def render_map_mode():
         )
 
     with c2:
+        # ラーバ通常デフォルト=週集計
         norm_data_mode = st.radio(
             "",
             ["生データ", "週集計"],
@@ -2997,6 +2989,7 @@ def render_map_mode():
         emphasize_stroke="rgba(0,0,0,0.35)",
         emphasize_stroke_width=2.0
     ):
+        """単一円（通常用）: total<=0 なら空文字（数字だけ出る事故を防ぐ）"""
         total = float(np.nansum(values))
         if (not np.isfinite(total)) or total <= 0:
             return ""
@@ -3085,7 +3078,14 @@ def render_map_mode():
         emphasize_stroke="rgba(0,0,0,0.35)",
         emphasize_stroke_width=2.0
     ):
-
+        """
+        比較用:
+          - 基準(core)は必ず描く（ただし core_total<=0 なら空を返す）
+          - 比較(ring)は draw_ring=True かつ ring_total>0 のときだけ描く
+          - GSI比較は center_text=None（中心数字なし）
+          - ラーバ比較は center_text=Δtotal（両方揃う点のみ）
+          - ★100%（単一カテゴリ）でも必ず描画する
+        """
         core_total = float(np.nansum(core_values))
         if (not np.isfinite(core_total)) or core_total <= 0:
             return ""  # 「数字だけ」を防ぐ
@@ -3135,6 +3135,7 @@ def render_map_mode():
             if (not np.isfinite(total)) or total <= 0:
                 return ""
 
+            # ★リングが単一カテゴリ100%なら「太いstroke円」で描く（強調も対応）
             nonz = [(i, float(v)) for i, v in enumerate(values)
                     if (v is not None and np.isfinite(v) and float(v) > 1e-12)]
             if len(nonz) == 1:
