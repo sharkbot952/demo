@@ -2534,6 +2534,58 @@ def render_cmem_mode():
 
                 fig.update_yaxes(autorange="reversed", title_text="水深 (m)", row=row_i, col=1)
        
+            # --- MY / ANFC 境界線（同月日比較：基準年データにANFCが含まれる期間の切替点に縦線） ---
+
+            def _cmem_boundary_xidx_base(df_a: pd.DataFrame, df_b: pd.DataFrame) -> List[int]:
+                frames = []
+                for df0 in (df_a, df_b):
+                    if df0 is None or df0.empty:
+                        continue
+                    if 'Source' not in df0.columns:
+                        continue
+                    dts = pd.to_datetime(df0[dt_col], errors='coerce')
+                    base_mask = (dts.dt.year == base_y)
+                    if not base_mask.any():
+                        continue
+                    d = df0.loc[base_mask, [dt_col, 'Source']].copy()
+                    d[dt_col] = pd.to_datetime(d[dt_col], errors='coerce')
+                    d = d.dropna(subset=[dt_col])
+                    if d.empty:
+                        continue
+
+                    if cmem_period == '月別':
+                        d['_m'] = d[dt_col].dt.month
+                        d = d[d['_m'].isin(month_order)]
+                        d['_x'] = d['_m'].map(month_order)
+                    else:
+                        d['_md'] = d[dt_col].dt.strftime('%m-%d')
+                        d = d[d['_md'].isin(md_order)]
+                        d['_x'] = d['_md'].map(md_order)
+
+                    d['_anfc'] = d['Source'].astype(str).str.strip().str.upper().eq('ANFC')
+                    frames.append(d[['_x', '_anfc']])
+
+                if not frames:
+                    return []
+                u = pd.concat(frames, ignore_index=True)
+                if u.empty:
+                    return []
+                g = u.groupby('_x', as_index=False)['_anfc'].any().sort_values('_x')
+                xs = g['_x'].tolist()
+                flags = g['_anfc'].tolist()
+                out = []
+                for i in range(1, len(xs)):
+                    if flags[i] != flags[i - 1]:
+                        out.append(xs[i])
+                return out
+
+            boundary_x = _cmem_boundary_xidx_base(df_t2, df_c2)
+            if boundary_x:
+                for bx in boundary_x:
+                    for rr in range(1, nrows + 1):
+                        fig.add_vline(x=bx, row=rr, col=1, line_width=6, line_dash='solid', line_color='white', opacity=0.75)
+                        fig.add_vline(x=bx, row=rr, col=1, line_width=2, line_dash='dot', line_color='black', opacity=0.85)
+
             fig.update_xaxes(tickmode="array", tickvals=tickvals, ticktext=ticktext)
             fig.update_xaxes(title_text=("月" if cmem_period == "月別" else "月日"), row=nrows, col=1)
             fig.update_layout(
