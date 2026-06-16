@@ -1434,8 +1434,8 @@ def summarize_weekly_for_depth(layer_name: str, target_depth: int, df_period: pd
         return f"**{layer_name}**： {int(target_depth)}m{tag}"
 
     n = len(temps)
-    idx_first = [i for i in [0, 1, 2] if i < n]
-    idx_last = [i for i in [4, 5, 6] if i < n]
+    idx_first = [i for i in [0, 1] if i < n]
+    idx_last = [i for i in [6, 7] if i < n]
     first = temps.iloc[idx_first] if idx_first else temps.iloc[:max(1, n // 2)]
     last  = temps.iloc[idx_last]  if idx_last  else temps.iloc[max(1, n // 2):]
     delta = float(last.mean() - first.mean())
