@@ -17,6 +17,24 @@ from pathlib import Path
 
 
 st.set_page_config(page_title="統合版", layout="wide")
+
+# Streamlit Cloud対策: safe_segmented_control が環境によってSegmentation faultを起こすため、
+# 同等の横並びradioに退避する薄いラッパー。
+def safe_segmented_control(label, options, *, default=None, key=None, label_visibility="visible", **kwargs):
+    opts = list(options)
+    idx = opts.index(default) if default in opts else 0
+    safe_label = label if str(label).strip() else "選択"
+    safe_visibility = label_visibility
+    if not str(label).strip():
+        safe_visibility = "collapsed"
+    return st.radio(
+        safe_label,
+        opts,
+        index=idx,
+        horizontal=True,
+        key=key,
+        label_visibility=safe_visibility,
+    )
 ANCHOR_YEAR = 2000
 
 def require_password_gate():
@@ -541,7 +559,7 @@ def render_larvae_mode(selected_areas: Optional[List[str]]):
 
     with c3:
         try:
-            mode_b = st.segmented_control('', options=['日別推移','期間内比率'], default='日別推移', key='larv_mode', label_visibility='collapsed')
+            mode_b = safe_segmented_control('', options=['日別推移','期間内比率'], default='日別推移', key='larv_mode', label_visibility='collapsed')
         except Exception:
             mode_b = st.radio('', ['日別推移','期間内比率'], index=0, horizontal=True, key='larv_mode_radio', label_visibility='collapsed')
 
@@ -1589,7 +1607,7 @@ def render_water_mode():
         min_day = latest_dt.date(); max_day = latest_dt.date()
 
     try:
-        graph_style = st.segmented_control("", options=["コンター", "折れ線"], default="コンター", key="graph_style")
+        graph_style = safe_segmented_control("", options=["コンター", "折れ線"], default="コンター", key="graph_style")
     except Exception:
         graph_style = st.radio("", ["コンター", "折れ線"], index=0, horizontal=True, key="graph_style_radio", label_visibility="collapsed")
     start_default = max(min_day, max_day - pd.Timedelta(days=10))
@@ -1602,7 +1620,7 @@ def render_water_mode():
     contour_agg = st.session_state.get("graph_contour_agg", "日平均")
     if graph_style == "コンター":
         try:
-            contour_agg = st.segmented_control("", options=["1時間", "日平均"], default="1時間", key="graph_contour_agg")
+            contour_agg = safe_segmented_control("", options=["1時間", "日平均"], default="1時間", key="graph_contour_agg")
         except Exception:
             contour_agg = st.radio("", ["1時間", "日平均"], index=1, horizontal=True, key="graph_contour_agg_radio", label_visibility="collapsed")
 
@@ -2171,7 +2189,7 @@ def render_cmem_mode():
         return s.min(), s.max()
 
     try:
-        cmem_period = st.segmented_control("", options=["日別", "月別"], default="日別", key="cmem_period")
+        cmem_period = safe_segmented_control("", options=["日別", "月別"], default="日別", key="cmem_period")
     except Exception:
         cmem_period = st.radio("", ["日別", "月別"], index=0, horizontal=True, key="cmem_period_radio", label_visibility="collapsed")
 
@@ -2665,7 +2683,7 @@ def render_calendar_mode():
     max_day = max(available_days) if available_days else latest_day
 
     try:
-        cal_choice = st.segmented_control(
+        cal_choice = safe_segmented_control(
             "", options=["週間表示", "選択日"],
             default="週間表示", key='cal_choice'
         )
@@ -3850,7 +3868,7 @@ def main():
         st.session_state["main_mode_value"] = "ガイダンス"
 
     try:
-        mode = st.segmented_control(
+        mode = safe_segmented_control(
             "",
             options=OPTIONS,
             key="main_mode_seg",
