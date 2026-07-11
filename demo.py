@@ -3834,32 +3834,30 @@ def reset_sidebar_state_for(prefix_keep: str):
 
 def main():
     import streamlit as st
-
     require_password_gate()
+    #try:
+    #    inject_compact_css()
+    #except Exception:
+    #    pass
 
-    try:
-        inject_compact_css()
-    except Exception:
-        pass
-
-    st_html("""
-    <script>
-    const id = "trial-note-fixed";
-    if (!window.parent.document.getElementById(id)) {
-      const div = window.parent.document.createElement("div");
-      div.id = id;
-      div.innerText = "※試験・関係者限定";
-      div.style.position = "fixed";
-      div.style.top = "6px";
-      div.style.left = "10px";
-      div.style.fontSize = "15px";
-      div.style.color = "rgba(120,120,120,0.8)";
-      div.style.zIndex = "999999";
-      div.style.pointerEvents = "none";
-      window.parent.document.body.appendChild(div);
-    }
-    </script>
-    """, height=0)
+    #st_html("""
+    #<script>
+    #const id = "trial-note-fixed";
+    #if (!window.parent.document.getElementById(id)) {
+    #  const div = window.parent.document.createElement("div");
+    #  div.id = id;
+    #  div.innerText = "※試験・関係者限定";
+    #  div.style.position = "fixed";
+    #  div.style.top = "6px";
+    #  div.style.left = "10px";
+    #  div.style.fontSize = "15px";
+    #  div.style.color = "rgba(120,120,120,0.8)";
+    #  div.style.zIndex = "999999";
+    #  div.style.pointerEvents = "none";
+    #  window.parent.document.body.appendChild(div);
+    #}
+    #</script>
+    #""", height=0)
 
 
     OPTIONS = ["ガイダンス", "水温図", "CMEM", "テスト", "ラーバ", "経年比較"]
