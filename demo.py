@@ -908,7 +908,7 @@ def render_yearly_compare_mode():
 HEAD_LENGTH_RATIO = 0.55
 HEAD_HALF_HEIGHT_RATIO = 0.35
 SHAFT_WIDTH_PX = 4.0
-OUTLIER_TH = 4.0          
+OUTLIER_TH = 6.0          
 OUTLIER_TH_OBS = 2.0      
 PHYS_MIN, PHYS_MAX = -1.5, 35.0
 
