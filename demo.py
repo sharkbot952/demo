@@ -1865,22 +1865,20 @@ def render_water_mode():
     
    
     if graph_style != "折れ線":
-        site_id = os.path.splitext(selected_file)[0] if selected_file else ""
-        df_thetao = load_cmem_thetao(site_id, fp="") if site_id else pd.DataFrame()
-        thetao_ok = (isinstance(df_thetao, pd.DataFrame) and (not df_thetao.empty))
+
         diff_candidates = []
         if corr_available and (not df_corr_period.empty) and ("corr_temp" in df_corr_period.columns):
             diff_candidates.append("実測 − 補正")
         diff_candidates.append("実測 − 予測")
-        if thetao_ok:
-            diff_candidates.append("実測 − CMEM(thetao)")
         default_diff = ("実測 − 補正" if "実測 − 補正" in diff_candidates else "実測 − 予測")
-        diff_mode = st.session_state.get("graph_diff_mode", default_diff)
-        if diff_mode not in diff_candidates:
-            diff_mode = default_diff
-            st.session_state["graph_diff_mode"] = diff_mode
+        
+        _cur = st.session_state.get("graph_diff_mode", default_diff)
+        _idx = diff_candidates.index(_cur) if _cur in diff_candidates else 0
 
-        tab_wt, tab_cum, tab_thr = st.tabs(["水温"])
+
+        diff_mode = st.selectbox("",diff_candidates,index=_idx,key="graph_diff_mode",label_visibility="collapsed")
+
+        tab_wt = st.tabs(["水温"])[0]
         def _render_wt_contour(_contour_value: str):
             contour_value = _contour_value
             if graph_style == "折れ線":
@@ -1919,15 +1917,15 @@ def render_water_mode():
             )
         
             # --- 下段：差分（選択） ---
-            site_id = os.path.splitext(selected_file)[0] if selected_file else ""
-            df_thetao = load_cmem_thetao(site_id, fp="") if site_id else pd.DataFrame()
-            thetao_ok = (isinstance(df_thetao, pd.DataFrame) and (not df_thetao.empty))
+            #site_id = os.path.splitext(selected_file)[0] if selected_file else ""
+            #df_thetao = load_cmem_thetao(site_id, fp="") if site_id else pd.DataFrame()
+            #thetao_ok = (isinstance(df_thetao, pd.DataFrame) and (not df_thetao.empty))
             diff_candidates = []
             if corr_available and (not df_corr_period.empty) and ("corr_temp" in df_corr_period.columns):
                 diff_candidates.append("実測 − 補正")
             diff_candidates.append("実測 − 予測")
-            if thetao_ok:
-                diff_candidates.append("実測 − CMEM(thetao)")
+            #if thetao_ok:
+            #   diff_candidates.append("実測 − CMEM(thetao)")
             default_diff = ("実測 − 補正" if "実測 − 補正" in diff_candidates else "実測 − 予測")
             diff_mode = st.session_state.get("graph_diff_mode", default_diff)
             if diff_mode not in diff_candidates:
@@ -1958,14 +1956,14 @@ def render_water_mode():
             obs_bin = _bin_series(df_obs, "obs_temp", ("median" if diff_freq == "1h" else "mean"), "obs")
             pred_bin = _bin_series(df_period, "pred_temp", "mean", "pred")
             corr_bin = _bin_series(df_corr_period, "corr_temp", "mean", "corr")
-            thetao_bin = _bin_series(df_thetao, "thetao", "mean", "thetao") if thetao_ok else pd.DataFrame(columns=["depth_m","time_bin","thetao"])
+            #thetao_bin = _bin_series(df_thetao, "thetao", "mean", "thetao") if thetao_ok else pd.DataFrame(columns=["depth_m","time_bin","thetao"])
             
             if diff_mode == "実測 − 補正":
                 A, B = obs_bin, corr_bin; a_col, b_col = "obs", "corr"; a_lbl, b_lbl = "実測", "補正"
             elif diff_mode == "実測 − 予測":
                 A, B = obs_bin, pred_bin; a_col, b_col = "obs", "pred"; a_lbl, b_lbl = "実測", "予測"
-            elif diff_mode == "実測 − CMEM(thetao)":
-                A, B = obs_bin, thetao_bin; a_col, b_col = "obs", "thetao"; a_lbl, b_lbl = "実測", "CMEM(thetao)"
+            #elif diff_mode == "実測 − CMEM(thetao)":
+            #   A, B = obs_bin, thetao_bin; a_col, b_col = "obs", "thetao"; a_lbl, b_lbl = "実測", "CMEM(thetao)"
             else:
                 A, B = obs_bin, pred_bin; a_col, b_col = "obs", "pred"; a_lbl, b_lbl = "実測", "予測"
             diff_title = f"{a_lbl} − {b_lbl}"
@@ -2013,36 +2011,6 @@ def render_water_mode():
             cb1_title = "℃"
             bg_colorscale = "Turbo"
             hover_bg = "日時=%{x|%Y-%m-%d %H:%M}<br>水深=%{y}m<br>T=%{z:.2f}℃<extra></extra>"
-
-            if 'contour_value' in locals() and contour_value == "積算水温":
-                if len(full_times) >= 2:
-                    dt_days = (full_times[1] - full_times[0]).total_seconds() / 86400.0
-                else:
-                    dt_days = 1.0
-
-                z_fill = np.where(np.isfinite(z_bg), z_bg, 0.0)
-                z_plot = np.cumsum(z_fill * dt_days, axis=1)
-
-                zmin_plot = 0.0
-                zmax_plot = float(np.nanmax(z_plot)) if np.isfinite(np.nanmax(z_plot)) else 1.0
-                bg_title_name = "積算水温コンター"
-                cb1_title = "℃・day"
-                hover_bg = "日時=%{x|%Y-%m-%d %H:%M}<br>水深=%{y}m<br>積算=%{z:.2f}℃・day<extra></extra>"
-            
-            elif 'contour_value' in locals() and contour_value == "22℃基準":
-                z_plot = np.maximum(z_bg - HIGH_TEMP_TH, 0.0)
-                zmin_plot = 0.0
-                try:
-                    zmax_plot = float(np.nanquantile(z_plot, 0.98))
-                except Exception:
-                    zmax_plot = float(np.nanmax(z_plot)) if np.isfinite(np.nanmax(z_plot)) else 0.5
-                if (not np.isfinite(zmax_plot)) or (zmax_plot <= 0):
-                    zmax_plot = 0.5
-                zmax_plot = max(zmax_plot, 0.5)
-                bg_title_name = "22℃基準温度コンター"
-                cb1_title = "超過℃"
-                bg_colorscale = "Reds"
-                hover_bg = "日時=%{x|%Y-%m-%d %H:%M}<br>水深=%{y}m<br>基準超過=%{z:.2f}℃<extra></extra>"
 
             try:
                 cb1['title'] = cb1_title
@@ -2124,18 +2092,7 @@ def render_water_mode():
 
         with tab_wt:
             _render_wt_contour("水温")
-        #with tab_cum:
-        #   _render_wt_contour("積算水温")
-        #with tab_thr:
-        #   _render_wt_contour("22℃基準")
 
-        if isinstance(diff_candidates, list) and (len(diff_candidates) > 0):
-            try:
-                _cur = st.session_state.get("graph_diff_mode", diff_mode)
-                _idx = diff_candidates.index(_cur) if _cur in diff_candidates else 0
-            except Exception:
-                _idx = 0
-            st.selectbox("", diff_candidates, index=_idx, key="graph_diff_mode", label_visibility="collapsed")
 def render_cmem_mode():
     selected_file = None
     sites = list_cmem_sites()
