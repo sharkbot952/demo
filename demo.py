@@ -1880,7 +1880,7 @@ def render_water_mode():
             diff_mode = default_diff
             st.session_state["graph_diff_mode"] = diff_mode
 
-        tab_wt, tab_cum, tab_thr = st.tabs(["水温", "積算水温", "22℃基準"])
+        tab_wt, tab_cum, tab_thr = st.tabs(["水温"])
         def _render_wt_contour(_contour_value: str):
             contour_value = _contour_value
             if graph_style == "折れ線":
@@ -2085,16 +2085,16 @@ def render_water_mode():
                     name="等温線（1℃）"
                 ), row=1, col=1)
 
-            if contour_value == "積算水温":
-                zmax_cum = float(np.nanmax(z_plot)) if np.isfinite(np.nanmax(z_plot)) else 0.0
-                if zmax_cum > 0:
-                    fig.add_trace(go.Contour(
-                        x=full_times, y=depths_bg, z=z_plot,
-                        contours=dict(start=0.0, end=zmax_cum, size=100.0, coloring="none"),
-                        line=dict(color="rgba(0,0,0,0.35)", width=1),
-                        showscale=False, hoverinfo="skip",
-                        name="等積算線（100℃・day）"
-                    ), row=1, col=1)
+            #if contour_value == "積算水温":
+            #   zmax_cum = float(np.nanmax(z_plot)) if np.isfinite(np.nanmax(z_plot)) else 0.0
+            #   if zmax_cum > 0:
+            #       fig.add_trace(go.Contour(
+            #           x=full_times, y=depths_bg, z=z_plot,
+            #           contours=dict(start=0.0, end=zmax_cum, size=100.0, coloring="none"),
+            #           line=dict(color="rgba(0,0,0,0.35)", width=1),
+            #           showscale=False, hoverinfo="skip",
+            #           name="等積算線（100℃・day）"
+            #       ), row=1, col=1)
         
             fig.add_trace(go.Heatmap(
                 x=full_times, y=depths_d, z=z_d,
@@ -2124,10 +2124,10 @@ def render_water_mode():
 
         with tab_wt:
             _render_wt_contour("水温")
-        with tab_cum:
-            _render_wt_contour("積算水温")
-        with tab_thr:
-            _render_wt_contour("22℃基準")
+        #with tab_cum:
+        #   _render_wt_contour("積算水温")
+        #with tab_thr:
+        #   _render_wt_contour("22℃基準")
 
         if isinstance(diff_candidates, list) and (len(diff_candidates) > 0):
             try:
@@ -3823,7 +3823,7 @@ def render_map_mode():
 
 def reset_sidebar_state_for(prefix_keep: str):
     import streamlit as st
-    prefixes = ("map_", "sc_", "larv_", "yc_", "water_", "cal_", "cmem_")
+    prefixes = ("map_", "sc_", "larv_", "yc_", "water_", "cal_")
     for k in list(st.session_state.keys()):
         if k.startswith(prefixes) and not k.startswith(prefix_keep):
             try:
@@ -3860,7 +3860,7 @@ def main():
     #""", height=0)
 
 
-    OPTIONS = ["ガイダンス", "水温図", "CMEM", "テスト", "ラーバ", "経年比較"]
+    OPTIONS = ["ガイダンス", "水温図", "テスト", "ラーバ", "経年比較"]
 
     if "main_mode_value" not in st.session_state:
         st.session_state["main_mode_value"] = "ガイダンス"
@@ -3893,9 +3893,9 @@ def main():
     if mode == "水温図":
         reset_sidebar_state_for("water_")
         render_water_mode()
-    elif mode == "CMEM":
-        reset_sidebar_state_for("cmem_")
-        render_cmem_mode()
+    #elif mode == "CMEM":
+    #    reset_sidebar_state_for("cmem_")
+    #    render_cmem_mode()
     elif mode == "ラーバ":
         reset_sidebar_state_for("larv_")
         render_larvae_mode(sel_areas)
