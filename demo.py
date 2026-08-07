@@ -18,8 +18,6 @@ from pathlib import Path
 
 st.set_page_config(page_title="統合版", layout="wide")
 
-# Streamlit Cloud対策: safe_segmented_control が環境によってSegmentation faultを起こすため、
-# 同等の横並びradioに退避する薄いラッパー。
 def safe_segmented_control(label, options, *, default=None, key=None, label_visibility="visible", **kwargs):
     opts = list(options)
     idx = opts.index(default) if default in opts else 0
@@ -334,9 +332,7 @@ def compute_comment_gsi(
     else:
         return np.nan
 
-# 水温
 def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
-    # --- ファイル選択・存在チェック ---
     parent_folder_dr = pjoin(base_dir, "pred")
     if not os.path.exists(parent_folder_dr):
         st.error(f"フォルダが見つかりません: {parent_folder_dr}")
@@ -346,7 +342,6 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
         st.warning("pred に CSV がありません")
         st.stop()
 
-    # ユーティリティ
     def parse_mmdd(s: str) -> dt.date:
         try:
             m, d = dt.datetime.strptime(s.strip(), "%m/%d").month, dt.datetime.strptime(s.strip(), "%m/%d").day
@@ -374,7 +369,6 @@ def render_water_with_optional_gsi_overlay(selected_areas_for_gsi: List[str]):
         else:
             return (y_end - start_anchor).days + 1 + (end_anchor - y_start).days + 1
 
-# ラーバ
 from typing import List
 from datetime import date
 import streamlit as st
@@ -775,7 +769,6 @@ def render_larvae_mode(selected_areas: Optional[List[str]]):
         if i < len(sel_areas_main or []) - 1:
             st.markdown("---")
 
-# 経年比較
 def render_yearly_compare_mode():
     import streamlit as st
     import pandas as pd
@@ -1607,7 +1600,7 @@ def render_water_mode():
         min_day = latest_dt.date(); max_day = latest_dt.date()
 
     try:
-        graph_style = safe_segmented_control("", options=["コンター", "折れ線"], default="コンター", key="graph_style")
+        graph_style = safe_segmented_control("", options=["コンター", "折れ線"], default="折れ線", key="graph_style")
     except Exception:
         graph_style = st.radio("", ["コンター", "折れ線"], index=0, horizontal=True, key="graph_style_radio", label_visibility="collapsed")
     start_default = max(min_day, max_day - pd.Timedelta(days=10))
