@@ -3792,29 +3792,6 @@ def reset_sidebar_state_for(prefix_keep: str):
 def main():
     import streamlit as st
     require_password_gate()
-    #try:
-    #    inject_compact_css()
-    #except Exception:
-    #    pass
-
-    #st_html("""
-    #<script>
-    #const id = "trial-note-fixed";
-    #if (!window.parent.document.getElementById(id)) {
-    #  const div = window.parent.document.createElement("div");
-    #  div.id = id;
-    #  div.innerText = "※試験・関係者限定";
-    #  div.style.position = "fixed";
-    #  div.style.top = "6px";
-    #  div.style.left = "10px";
-    #  div.style.fontSize = "15px";
-    #  div.style.color = "rgba(120,120,120,0.8)";
-    #  div.style.zIndex = "999999";
-    #  div.style.pointerEvents = "none";
-    #  window.parent.document.body.appendChild(div);
-    #}
-    #</script>
-    #""", height=0)
 
 
     OPTIONS = ["ガイダンス", "水温図", "テスト", "ラーバ", "経年比較"]
@@ -3847,12 +3824,13 @@ def main():
     with st.sidebar:
         pass
 
-    if mode == "水温図":
+    if mode == "ガイダンス":
+        st.info("表示したい項目を上のメニューから選択してください。")
+        st.caption("初回起動を軽くするため、データ読み込みは各モード選択後に実行します。")
+        return
+    elif mode == "水温図":
         reset_sidebar_state_for("water_")
         render_water_mode()
-    #elif mode == "CMEM":
-    #    reset_sidebar_state_for("cmem_")
-    #    render_cmem_mode()
     elif mode == "ラーバ":
         reset_sidebar_state_for("larv_")
         render_larvae_mode(sel_areas)
